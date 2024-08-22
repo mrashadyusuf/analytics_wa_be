@@ -1,10 +1,8 @@
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from typing import Optional
-from datetime import date
+from datetime import date, datetime
 
-# Shared properties
 class TransactionBase(BaseModel):
-    transaction_id: str
     transaction_channel: str  # Required field
     model_product: str  # Required field
     price_product: str  # Required field
@@ -15,10 +13,11 @@ class TransactionBase(BaseModel):
     address_cust: str  # Required field
     instagram_cust: Optional[str] = None  # Optional field
     created_by: str  # Required field
-    created_dt: date
+    created_dt: datetime = Field(default_factory=lambda: datetime.now()) 
     updated_by: str  # Required field
-    updated_dt: date
+    updated_dt: datetime = Field(default_factory=lambda: datetime.now())
     transaction_dt: date
+
 
 # Properties to receive on item creation
 class TransactionCreate(TransactionBase):
@@ -30,5 +29,7 @@ class TransactionUpdate(TransactionBase):
 
 # Properties stored in the database
 class TransactionInDB(TransactionBase):
+    transaction_id: str  # Include transaction_id in the response
+
     class Config:
         orm_mode = True

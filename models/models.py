@@ -1,5 +1,6 @@
-from sqlalchemy import Column, String, Date
+from sqlalchemy import Column, String, Date, DateTime
 from database import Base
+from datetime import datetime
 
 class Transaction(Base):
     __tablename__ = "tb_transaction"
@@ -16,7 +17,7 @@ class Transaction(Base):
     address_cust = Column(String(255), nullable=True)
     instagram_cust = Column(String(255), nullable=True)
     created_by = Column(String(255), nullable=True)
-    created_dt = Column(Date, nullable=True)
+    created_dt = Column(DateTime, nullable=True, default=datetime.now)
     updated_by = Column(String(255), nullable=True)
-    updated_dt = Column(Date, nullable=True)
+    updated_dt = Column(DateTime, nullable=True, default=datetime.now)
     transaction_dt = Column(Date, nullable=True)

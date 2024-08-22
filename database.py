@@ -3,8 +3,13 @@ from sqlalchemy import create_engine, MetaData
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
 from databases import Database
+from dotenv import load_dotenv
+import os
 
-DATABASE_URL = "postgresql://postgres:B4dF278c!!@146.190.104.51:5432/analytics_scrapper"
+load_dotenv()
+
+# Get the DATABASE_URL from the environment
+DATABASE_URL = os.getenv("DATABASE_URL")
 
 # SQLAlchemy engine
 engine = create_engine(DATABASE_URL)
