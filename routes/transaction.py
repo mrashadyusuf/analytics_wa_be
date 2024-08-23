@@ -58,20 +58,45 @@ def create_transaction(
     # 8. Return the newly created transaction
     return db_transaction
 
+from sqlalchemy import or_
+
 @router.get("/", status_code=status.HTTP_200_OK)
 def read_transactions(
     offset: int = 0,  # Changed parameter name from skip to offset
     limit: int = 10, 
+    search: str = "",  # Added search parameter
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)  # JWT authentication
 ):
-    # Query for the total count of all transactions
-    total_all_data = db.query(Transaction).count()
+    # Base query
+    query = db.query(Transaction)
+    
+    # Apply search filter if search term is provided
+    if search:
+        search_filter = or_(
+            Transaction.transaction_id.ilike(f"%{search}%"),
+            Transaction.transaction_channel.ilike(f"%{search}%"),
+            Transaction.model_product.ilike(f"%{search}%"),
+            Transaction.price_product.ilike(f"%{search}%"),
+            Transaction.no_hp_cust.ilike(f"%{search}%"),
+            Transaction.name_cust.ilike(f"%{search}%"),
+            Transaction.city_cust.ilike(f"%{search}%"),
+            Transaction.prov_cust.ilike(f"%{search}%"),
+            Transaction.address_cust.ilike(f"%{search}%"),
+            Transaction.instagram_cust.ilike(f"%{search}%"),
+            Transaction.created_by.ilike(f"%{search}%"),
+            Transaction.updated_by.ilike(f"%{search}%"),
+            # You can add more fields as needed
+        )
+        query = query.filter(search_filter)
+    
+    # Query for the total count of the filtered transactions
+    total_all_data = query.count()
         
     # Query for the paginated transactions
-    transactions = db.query(Transaction).order_by(desc(Transaction.created_dt)).offset(offset).limit(limit).all()
+    transactions = query.order_by(desc(Transaction.created_dt)).offset(offset).limit(limit).all()
     
-    total_data =  db.query(Transaction).order_by(desc(Transaction.created_dt)).offset(offset).limit(limit).count()
+    total_data = len(transactions)
 
     # Return the transactions, the total count, the total count of all data, and the offset
     return {
@@ -80,6 +105,7 @@ def read_transactions(
         "offset": offset,
         "transactions": transactions
     }
+
 
 
 @router.get("/{transaction_id}", response_model=TransactionInDB,  status_code=status.HTTP_200_OK)
