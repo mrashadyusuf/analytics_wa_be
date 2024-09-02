@@ -17,6 +17,7 @@ class TransactionBase(BaseModel):
     updated_by: str  # Required field
     updated_dt: datetime = Field(default_factory=lambda: datetime.now())
     transaction_dt: date
+    kuantitas: int = Field(default=1)  # Required field with default value 1
 
 
 # Properties to receive on item creation

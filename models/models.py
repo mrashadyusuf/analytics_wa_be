@@ -1,4 +1,4 @@
-from sqlalchemy import Column, String, Date, DateTime
+from sqlalchemy import Column, String, Date, DateTime, Integer
 from database import Base
 from datetime import datetime
 
@@ -21,3 +21,4 @@ class Transaction(Base):
     updated_by = Column(String(255), nullable=True)
     updated_dt = Column(DateTime, nullable=True, default=datetime.now)
     transaction_dt = Column(Date, nullable=True)
+    kuantitas = Column(Integer, nullable=True, default=1)
