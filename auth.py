@@ -31,6 +31,7 @@ class User(BaseModel):
 
 class UserInDB(User):
     hashed_password: str
+    group: str
 
 def verify_password(plain_password, hashed_password):
     return pwd_context.verify(plain_password, hashed_password)
@@ -51,10 +52,12 @@ def create_access_token(data: dict, expires_delta: timedelta | None = None):
 def get_user(db, username: str):
     if username in db:
         user_dict = db[username]
+        print("user_dict",user_dict)
         return UserInDB(**user_dict)
 
 def authenticate_user(db, username: str, password: str):
     user = get_user(db, username)
+    print("user0",user)
     if not user:
         return False
     if not verify_password(password, user.hashed_password):
@@ -91,7 +94,8 @@ def initialize_fake_db():
     hashed_password = get_password_hash("admin")
     fake_users_db["admin"] = {
         "username": "admin",
-        "hashed_password": hashed_password
+        "hashed_password": hashed_password,
+        "group":"teman-thrifty"
     }
 
 # Initialize the database with the admin user

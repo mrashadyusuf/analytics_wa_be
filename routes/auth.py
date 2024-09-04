@@ -15,9 +15,14 @@ class LoginRequest(BaseModel):
     username: str
     password: str
 
+class Token(BaseModel):
+    access_token: str
+    token_type: str
+    group: str
+    
 @router.post("/login", response_model=Token)
 async def login_for_access_token(login: LoginRequest):
-    print("fake_users_db",fake_users_db)
+    print("fake_users_dbs",fake_users_db)
     user = authenticate_user(fake_users_db, login.username, login.password)
     if not user:
         raise HTTPException(
@@ -29,7 +34,7 @@ async def login_for_access_token(login: LoginRequest):
     access_token = create_access_token(
         data={"sub": user.username}, expires_delta=access_token_expires
     )
-    return {"access_token": access_token, "token_type": "bearer"}
+    return {"access_token": access_token, "token_type": "bearer", "group":user.group}
 
 @router.post("/register", response_model=LoginRequest)
 async def register_user(user: LoginRequest):

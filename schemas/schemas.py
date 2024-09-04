@@ -5,8 +5,8 @@ from datetime import date, datetime
 class TransactionBase(BaseModel):
     transaction_channel: str  # Required field
     model_product: str  # Required field
-    price_product: str  # Required field
-    no_hp_cust: str  # Required field
+    price_product: str = Field(default="10000")   # Required field
+    no_hp_cust: str = Field(default="08123456789")   # Required field
     name_cust: str  # Required field
     city_cust: str  # Required field
     prov_cust: str  # Required field
