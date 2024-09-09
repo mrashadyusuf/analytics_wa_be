@@ -8,13 +8,50 @@ from auth import get_current_user, User
 from routes.auth import router as auth_router
 from routes.transaction import router as transaction_router
 from routes.test import router as test_router
+from routes.etl import etl
+import asyncio
+from apscheduler.schedulers.background import BackgroundScheduler
+
+from routes.etl import data_transaksi, chat_wa, sum_transaksi, sum_average_sales, sum_customer, sum_model, sum_region, sum_sales_trend, sum_sales_trend_pertanggal, sum_store, sum_top_produk, sum_wa, sum_customer_follower
 
 from database import engine, database
 
 app = FastAPI()
+@app.get("/")
+async def root():
+    return {"message": "TLE API version 1.0"}
+
+scheduler = True
+def run_data_transaksi():
+    asyncio.run(data_transaksi(scheduler))
+
+def run_chat_wa():
+    asyncio.run(chat_wa(scheduler))
+
+def run_data_summary():
+    asyncio.run(sum_transaksi())
+    asyncio.run(sum_average_sales())
+    asyncio.run(sum_customer())
+    asyncio.run(sum_model())
+    asyncio.run(sum_region())
+    asyncio.run(sum_sales_trend())
+    asyncio.run(sum_sales_trend_pertanggal())
+    asyncio.run(sum_store())
+    asyncio.run(sum_top_produk())
+    asyncio.run(sum_wa())
+    asyncio.run(sum_customer_follower())
+
 @app.on_event("startup")
 async def startup():
     await database.connect()
+    # jalanin scheduler
+    
+    # sched = BackgroundScheduler()
+    # sched.add_job(run_data_transaksi, trigger='interval', minutes=5)
+    # sched.add_job(run_chat_wa, trigger='interval', seconds=60)
+    # sched.add_job(run_data_summary, trigger='interval', minutes=10)
+    # sched.start()
+
 
 @app.on_event("shutdown")
 async def shutdown():
@@ -74,6 +111,7 @@ def add_security_headers(app):
 app.include_router(auth_router, prefix="/auth")
 app.include_router(transaction_router, prefix="/transactions")
 app.include_router(test_router, prefix="/test")
+app.include_router(etl, prefix="/etl")
 
 # Add CORS and security headers
 app = add_security_headers(cors_headers(app))
