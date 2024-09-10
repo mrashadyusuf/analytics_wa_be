@@ -11,6 +11,7 @@ from routes.test import router as test_router
 from routes.etl import etl
 import asyncio
 from apscheduler.schedulers.background import BackgroundScheduler
+from utilities.instagram import schedule_get_follower
 
 from routes.etl import data_transaksi, chat_wa, sum_transaksi, sum_average_sales, sum_customer, sum_model, sum_region, sum_sales_trend, sum_sales_trend_pertanggal, sum_store, sum_top_produk, sum_wa, sum_customer_follower
 
@@ -41,16 +42,20 @@ def run_data_summary():
     asyncio.run(sum_wa())
     asyncio.run(sum_customer_follower())
 
+def run_get_follower():
+    asyncio.run(schedule_get_follower())
+
 @app.on_event("startup")
 async def startup():
     await database.connect()
-    # jalanin scheduler
     
-    # sched = BackgroundScheduler()
-    # sched.add_job(run_data_transaksi, trigger='interval', minutes=5)
-    # sched.add_job(run_chat_wa, trigger='interval', seconds=60)
-    # sched.add_job(run_data_summary, trigger='interval', minutes=10)
-    # sched.start()
+    # jalanin scheduler    
+    sched = BackgroundScheduler()
+    sched.add_job(run_data_transaksi, trigger='interval', minutes=5)
+    sched.add_job(run_chat_wa, trigger='interval', seconds=60)
+    sched.add_job(run_data_summary, trigger='interval', minutes=10)
+    sched.add_job(run_get_follower, trigger='interval', minutes=60)
+    sched.start()
 
 
 @app.on_event("shutdown")

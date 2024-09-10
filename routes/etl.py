@@ -1,16 +1,15 @@
 from fastapi import APIRouter, Response
 from models.etl_models import SumAverageSales,ChatWa,SumCustomer,Transaksi,SumCustomerFollower,SumModel,SumRegion,SumSalesTrend,SumSalesTrendPertanggal,SumStore,SumTopProduk,SumTransaksi,SumWa
-from database import conn, engine
+from database import conn
 import duckdb
 from sqlalchemy.sql import text
 import pandas as pd
 import datetime
-# from utilities.duckdb import duckdb_conn, parquet_file_name
+
 from utilities.aws import getJsonFromAws, s3_path, get_duckdb_connection, getParquetFromAws
 
 
 etl = APIRouter()
-# duckdb_conn = duckdb.connect('teman-trifty.duckdb')
 
 @etl.get('/', description="Menampilkan detail data")
 async def find_role(response: Response):

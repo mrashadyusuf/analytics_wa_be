@@ -1,1 +1,10 @@
 DATABASE_URL="postgresql://<username>:<password>@<host>:<port>/<database_name>"
+
+#aws
+ACCESS_KEY=
+SECRET_KEY=
+REGION=us-
+
+#akun instagram
+USERNAME_IG=
+PASSWORD_IG=
