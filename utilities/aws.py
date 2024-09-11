@@ -4,7 +4,6 @@ import boto3
 import json
 from datetime import datetime
 import uuid
-from auth import get_current_user, User
 import duckdb
 from botocore.exceptions import ClientError
 import pandas as pd
@@ -18,7 +17,7 @@ aws_region = os.getenv("REGION")
 
 
 def generate_bucket_name():
-    
+
     user_group = "teman-thrifty"
     return f'customer-{user_group.lower()}'
 
@@ -125,7 +124,7 @@ def get_duckdb_connection():
         raise ValueError("AWS credentials are not set in the environment variables.")
 
     # Create a DuckDB connection
-    bucket_name = generate_bucket_name()
+    # bucket_name = generate_bucket_name()
     duckdb_conn = duckdb.connect()
     print("DuckDB connection established.")
 
@@ -142,12 +141,13 @@ def get_duckdb_connection():
     
     return duckdb_conn
 
-def s3_path(transaction):
+def s3_path(bucket, transaction):
     parquet_prefix = "ETL/"
     if transaction:
         parquet_prefix = "TRANSACTION/"
 
-    bucket_name = generate_bucket_name() 
+    # bucket_name = generate_bucket_name() 
+    bucket_name = f'customer-{bucket.lower()}'
     path = f"s3://{bucket_name}/{parquet_prefix}"
 
     s3_client = boto3.client('s3', aws_access_key_id=aws_access_key, aws_secret_access_key=aws_secret_key, region_name=aws_region)
@@ -169,7 +169,7 @@ def s3_path(transaction):
 
     return path
 
-def getParquetFromAws(scheduler):
+def getParquetFromAws(bucket, scheduler):
     session = boto3.Session(
         aws_access_key_id=aws_access_key,
         aws_secret_access_key=aws_secret_key,
@@ -179,8 +179,8 @@ def getParquetFromAws(scheduler):
     s3 = session.client('s3')
 
     # Nama bucket
-    bucket_name = 'customer-teman-thrifty'
-    folder_name = 'WA_SCRAPPER /Rashad Simpati/'
+    bucket_name = f'customer-{bucket.lower()}'
+    folder_name = 'WA_SCRAPPER/'
 
     response = s3.list_objects_v2(Bucket=bucket_name, Prefix=folder_name)
 
@@ -192,39 +192,36 @@ def getParquetFromAws(scheduler):
         # Cek jika file adalah file parquet dan berdasarkan tanggal LastModified
         if obj['Key'].endswith('.parquet') :
             kontak_name = obj['Key'].split('/')[1]
-            if scheduler :
-                print(f"=== Mulai Menjalankan scheduler chat wa ===")
-                lastmodified = obj['LastModified'].strftime('%Y-%m-%d')
-
-                if lastmodified == today :
-                    # Mendapatkan file parquet dari S3
-                    file_response = s3.get_object(Bucket=bucket_name, Key=obj['Key'])
-                    file_stream = BytesIO(file_response['Body'].read())
-                    df = pd.read_parquet(file_stream)
+            lastmodified = obj['LastModified'].strftime('%Y-%m-%d')
+            if scheduler & (lastmodified == today):
+                # Mendapatkan file parquet dari S3
+                file_response = s3.get_object(Bucket=bucket_name, Key=obj['Key'])
+                file_stream = BytesIO(file_response['Body'].read())
+                df = pd.read_parquet(file_stream)
 
                     # Mengambil informasi yang diinginkan dari file parquet
-                    try:
-                        fromMe = df['fromMe'].iloc[0]
-                        t = df['timestamp'].iloc[0].strftime('%Y-%m-%d %H:%M:%S')
-                        from_ = df['from'].iloc[0]
-                        to = df['to'].iloc[0]
-                        nama = kontak_name
+                try:
+                    fromMe = df['fromMe'].iloc[0]
+                    t = df['timestamp'].iloc[0].strftime('%Y-%m-%d %H:%M:%S')
+                    from_ = df['from'].iloc[0]
+                    to = df['to'].iloc[0]
+                    nama = kontak_name
 
-                        no_hp = from_
-                        if fromMe:
-                            no_hp = to
+                    no_hp = from_
+                    if fromMe:
+                        no_hp = to
 
-                        chat.append({
-                            'id': str(uuid.uuid4()),
-                            'nama': nama,
-                            'no_hp': no_hp,
-                            'tanggal': t,
-                            'is_end_chat': None,
-                            'status': None
-                        })
+                    chat.append({
+                        'id': str(uuid.uuid4()),
+                        'nama': nama,
+                        'no_hp': no_hp.split('@')[0],
+                        'tanggal': t,
+                        'is_end_chat': None,
+                        'status': None
+                    })
                         
-                    except KeyError as e:
-                        print(f"Error parsing JSON: {e}")
+                except KeyError as e:
+                    print(f"Error parsing JSON: {e}")
             else:
                 # Mendapatkan file parquet dari S3
                 file_response = s3.get_object(Bucket=bucket_name, Key=obj['Key'])
@@ -246,7 +243,7 @@ def getParquetFromAws(scheduler):
                     chat.append({
                         'id': str(uuid.uuid4()),
                         'nama': nama,
-                        'no_hp': no_hp,
+                        'no_hp': no_hp.split('@')[0],
                         'tanggal': t,
                         'is_end_chat': None,
                         'status': None

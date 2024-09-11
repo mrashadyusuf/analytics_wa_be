@@ -15,8 +15,8 @@ load_dotenv()
 username_ig = os.getenv('USERNAME_IG')
 password = os.getenv('PASSWORD_IG')
 
-async def schedule_get_follower():
-    path = s3_path(transaction = None)
+async def schedule_get_follower(bucket):
+    path = s3_path(bucket, None)
     tb_path = f"{path}tb_sum_customer_follower.parquet"
     duckdb_conn = get_duckdb_connection()
     query = """

@@ -50,12 +50,12 @@ async def startup():
     await database.connect()
     
     # jalanin scheduler    
-    sched = BackgroundScheduler()
-    sched.add_job(run_data_transaksi, trigger='interval', minutes=5)
-    sched.add_job(run_chat_wa, trigger='interval', seconds=60)
-    sched.add_job(run_data_summary, trigger='interval', minutes=10)
-    sched.add_job(run_get_follower, trigger='interval', minutes=60)
-    sched.start()
+    # sched = BackgroundScheduler()
+    # sched.add_job(run_data_transaksi, trigger='interval', minutes=5)
+    # sched.add_job(run_chat_wa, trigger='interval', seconds=60)
+    # sched.add_job(run_data_summary, trigger='interval', minutes=10)
+    # sched.add_job(run_get_follower, trigger='interval', minutes=60)
+    # sched.start()
 
 
 @app.on_event("shutdown")

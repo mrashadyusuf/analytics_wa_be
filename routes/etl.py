@@ -1,35 +1,73 @@
-from fastapi import APIRouter, Response
+from fastapi import APIRouter, Response, Depends
 from models.etl_models import SumAverageSales,ChatWa,SumCustomer,Transaksi,SumCustomerFollower,SumModel,SumRegion,SumSalesTrend,SumSalesTrendPertanggal,SumStore,SumTopProduk,SumTransaksi,SumWa
 from database import conn
 import duckdb
 from sqlalchemy.sql import text
 import pandas as pd
 import datetime
+from utilities.instagram import schedule_get_follower
 
 from utilities.aws import getJsonFromAws, s3_path, get_duckdb_connection, getParquetFromAws
+from auth import get_current_user, User
+import asyncio
+from apscheduler.schedulers.background import BackgroundScheduler
+
+sched = BackgroundScheduler()
+
+def run_data_transaksi(scheduler, bucket):
+    print(f"Menjalankan scheduler untuk data transaksi")
+    asyncio.run(data_transaksi(scheduler, bucket))
+    print(f"Selesai menjalankan scheduler untuk data transaksi")
+
+def run_chat_wa(scheduler, bucket):
+    print(f"Menjalankan scheduler untuk chat wa")
+    asyncio.run(chat_wa(scheduler, bucket))
+    print(f"Selesai menjalankan scheduler untuk chat wa")
+
+def run_data_summary(bucket):
+    print(f"Menjalankan scheduler untuk data summary")
+    asyncio.run(sum_transaksi(bucket))
+    asyncio.run(sum_average_sales(bucket))
+    asyncio.run(sum_customer(bucket))
+    asyncio.run(sum_model(bucket))
+    asyncio.run(sum_region(bucket))
+    asyncio.run(sum_sales_trend(bucket))
+    asyncio.run(sum_sales_trend_pertanggal(bucket))
+    asyncio.run(sum_store(bucket))
+    asyncio.run(sum_top_produk(bucket))
+    asyncio.run(sum_wa(bucket))
+    asyncio.run(sum_customer_follower(bucket))
+    print(f"Selesai menjalankan scheduler untuk data summary")
+
+def run_get_follower(bucket):
+    print(f"Menjalankan scheduler untuk data instagram")
+    asyncio.run(schedule_get_follower(bucket))
+    print(f"Selesai menjalankan scheduler untuk data instagram")
 
 
 etl = APIRouter()
 
-@etl.get('/', description="Menampilkan detail data")
-async def find_role(response: Response):
-    
+@etl.post('/', description="Menampilkan detail data")
+async def run_etl(response: Response
+                    , current_user: User = Depends(get_current_user)
+                    ):
+    bucket = current_user.group
     scheduler = False
     mulai = datetime.datetime.now()
     
-    await data_transaksi(scheduler)
-    await chat_wa(scheduler)
-    await sum_transaksi()
-    await sum_average_sales()
-    await sum_customer()
-    await sum_model()
-    await sum_region()
-    await sum_sales_trend()
-    await sum_sales_trend_pertanggal()
-    await sum_store()
-    await sum_top_produk()
-    await sum_wa()
-    await sum_customer_follower()
+    await data_transaksi(scheduler, bucket)
+    await chat_wa(scheduler, bucket)
+    await sum_transaksi(bucket)
+    await sum_average_sales(bucket)
+    await sum_customer(bucket)
+    await sum_model(bucket)
+    await sum_region(bucket)
+    await sum_sales_trend(bucket)
+    await sum_sales_trend_pertanggal(bucket)
+    await sum_store(bucket)
+    await sum_top_produk(bucket)
+    await sum_wa(bucket)
+    await sum_customer_follower(bucket)
     
     selesai = datetime.datetime.now()
     durasi = selesai - mulai
@@ -37,9 +75,31 @@ async def find_role(response: Response):
     response = {"message": f"sukses menjalankan semua fungsi ETL dengan durasi {durasi}" }
     return response
 
+@etl.post('/start_scheduler', description="Menampilkan detail data")
+async def run_scheduler(response: Response
+                    , current_user: User = Depends(get_current_user)
+                    ):
+    bucket = current_user.group
+    scheduler = True
+    
+    sched.add_job(run_data_transaksi, trigger='interval', minutes=5, args=[scheduler, bucket])
+    sched.add_job(run_chat_wa, trigger='interval', seconds=60, args=[scheduler, bucket])
+    sched.add_job(run_data_summary, trigger='interval', minutes=10, args=[bucket])
+    sched.add_job(run_get_follower, trigger='interval', minutes=60, args=[bucket])
+    sched.start()
+    
+    response = {"message": f"ETL sudah dijadwalkan" }
+    return response
 
-async def data_transaksi(scheduler):    
-    path = s3_path(transaction = "transaksi")
+@etl.post("/stop_scheduler")
+async def stop_schedule():
+    if sched.state == 1:
+        sched.shutdown()
+    return {"message": "Scheduler dihentikan."}
+
+
+async def data_transaksi(scheduler, bucket):    
+    path = s3_path(bucket, transaction = "transaksi")
     tb_path = f"{path}transaction.parquet"
     duckdb_conn = get_duckdb_connection()
     query = f"""
@@ -55,15 +115,15 @@ async def data_transaksi(scheduler):
            f""" WHERE created_dt::date = CURRENT_DATE
         """
 
-    q = """SELECT id, tgl_transaksi, tanggal, bulan, tahun, nama, model, alamat, no_telp, provinsi, kota_kab, 
-        LOWER(SPLIT_PART(REGEXP_REPLACE(instagram, '^[: @]+', ''), ' ', 1)) AS instagram, store, harga, kuantitas
-        FROM tb_transaksi"""
-    q = text(q)
-    dataPostgre = conn.execute(q).fetchall()
+    # q = """SELECT id, tgl_transaksi, tanggal, bulan, tahun, nama, model, alamat, no_telp, provinsi, kota_kab, 
+    #     LOWER(SPLIT_PART(REGEXP_REPLACE(instagram, '^[: @]+', ''), ' ', 1)) AS instagram, store, harga, kuantitas
+    #     FROM tb_transaksi"""
+    # q = text(q)
+    # dataPostgre = conn.execute(q).fetchall()
 
-    data = duckdb_conn.execute(query).fetchall()
+    dataTransaksi = duckdb_conn.execute(query).fetchall()
     
-    dataTransaksi = dataPostgre + data
+    # dataTransaksi = dataPostgre + data
 
     df = pd.DataFrame(dataTransaksi, columns=[
         'id', 'tgl_transaksi', 'tanggal', 
@@ -71,46 +131,59 @@ async def data_transaksi(scheduler):
         'alamat', 'no_telp', 'provinsi', 'kota_kab',
         'instagram', 'store', 'harga', 'kuantitas'
     ])
-    duckdb_conn.register('transaction_view', df)
-    duckdb_conn.execute("""
-                    CREATE TABLE IF NOT EXISTS tb_transaksi (
-                    id varchar,
-                    tgl_transaksi date,
-                    tanggal varchar,
-                    bulan varchar,
-                    tahun varchar,
-                    nama varchar,
-                    model varchar,
-                    alamat varchar,
-                    no_telp varchar,
-                    provinsi varchar,
-                    kota_kab varchar,
-                    instagram varchar,
-                    store varchar,
-                    harga int4,
-                    kuantitas int4
-        )
-    """)
-    path = s3_path(transaction = None)
-    # duckdb_conn.execute("CREATE TABLE IF NOT EXISTS tb_transaksi AS SELECT * FROM transaction_view")
-    duckdb_conn.execute("INSERT INTO tb_transaksi SELECT * FROM transaction_view WHERE id NOT IN (SELECT id FROM tb_transaksi)")
-    duckdb_conn.execute(f"COPY tb_transaksi TO '{path}tb_transaksi.parquet' (FORMAT PARQUET)")
+    
+    path = s3_path(bucket, None)
+    pq = f"""SELECT * FROM read_parquet('{path}tb_transaksi.parquet')"""
+    exist_pq = duckdb_conn.execute(pq).fetchdf()
+    df_new = duckdb_conn.execute(f"""
+        SELECT * FROM df
+        WHERE id NOT IN (SELECT id FROM exist_pq)
+    """).fetchdf()
+    if len(df_new) > 0:
+        df_combined = pd.concat([exist_pq, df_new], ignore_index=True)
+        duckdb_conn.register('transaction_view', df_combined)
+
+        duckdb_conn.execute(f"COPY transaction_view TO '{path}tb_transaksi.parquet' (FORMAT PARQUET)")
+
+    # duckdb_conn.execute("""
+    #                 CREATE TABLE IF NOT EXISTS tb_transaksi (
+    #                 id varchar,
+    #                 tgl_transaksi date,
+    #                 tanggal varchar,
+    #                 bulan varchar,
+    #                 tahun varchar,
+    #                 nama varchar,
+    #                 model varchar,
+    #                 alamat varchar,
+    #                 no_telp varchar,
+    #                 provinsi varchar,
+    #                 kota_kab varchar,
+    #                 instagram varchar,
+    #                 store varchar,
+    #                 harga int4,
+    #                 kuantitas int4
+    #     )
+    # """)
+    # path = s3_path(transaction = None)
+    # # duckdb_conn.execute("CREATE TABLE IF NOT EXISTS tb_transaksi AS SELECT * FROM transaction_view")
+    # duckdb_conn.execute("INSERT INTO tb_transaksi SELECT * FROM transaction_view WHERE id NOT IN (SELECT id FROM tb_transaksi)")
+
     
     # Tutup koneksi setelah selesai
     duckdb_conn.close()
     
 
-async def sum_transaksi():
-    path = s3_path(transaction = None)
+async def sum_transaksi(bucket):
+    path = s3_path(bucket, None)
     tb_path = f"{path}tb_transaksi.parquet"
     duckdb_conn = get_duckdb_connection()
     pq = f"""
         SELECT strftime(tgl_transaksi, '%Y %m') AS tgl, tahun, provinsi, model, store, 
-        SUM(harga) total_harga, COUNT(*) jumlah, CASE 
-            WHEN SUM(kuantitas) IS NULL THEN
+        SUM(harga::INTEGER) total_harga, COUNT(*) jumlah, CASE 
+            WHEN SUM(kuantitas::INTEGER) IS NULL THEN
                 0
             ELSE
-                SUM(kuantitas)
+                SUM(kuantitas::INTEGER)
         END AS kuantitas
         FROM read_parquet('{tb_path}')
         WHERE provinsi IS NOT NULL AND model IS NOT NULL
@@ -161,23 +234,23 @@ async def sum_transaksi():
             conn.commit()
     duckdb_conn.close()
 
-async def chat_wa(scheduler):
+async def chat_wa(scheduler, bucket):
     duckdb_conn = get_duckdb_connection()
-    path = s3_path(transaction = None)
+    path = s3_path(bucket, None)
     
     # Membuat tabel jika belum ada
-    duckdb_conn.execute("""
-        CREATE TABLE IF NOT EXISTS tb_chat_wa (
-            id varchar,
-            nama varchar,
-            no_hp varchar,
-            tanggal datetime,
-            is_end_chat boolean default null,
-            status varchar default null
-        )
-    """)
+    # duckdb_conn.execute("""
+    #     CREATE TABLE IF NOT EXISTS tb_chat_wa (
+    #         id varchar,
+    #         nama varchar,
+    #         no_hp varchar,
+    #         tanggal datetime,
+    #         is_end_chat boolean default null,
+    #         status varchar default null
+    #     )
+    # """)
     # chatFile = getJsonFromAws(scheduler)
-    chatFile = getParquetFromAws(scheduler)
+    chatFile = getParquetFromAws(bucket, scheduler)
     
     df = pd.DataFrame(chatFile, columns=[
         'id', 'nama', 'no_hp', 'tanggal', 'is_end_chat','status'
@@ -185,16 +258,24 @@ async def chat_wa(scheduler):
 
     duckdb_conn.register('tb_chat_wa_view', df)
 
-    if len(chatFile) > 0 :
-        duckdb_conn.execute("INSERT INTO tb_chat_wa SELECT * FROM tb_chat_wa_view WHERE nama NOT IN (SELECT nama FROM tb_chat_wa) AND no_hp NOT IN (SELECT no_hp FROM tb_chat_wa) AND tanggal NOT IN (SELECT CAST(tanggal AS VARCHAR) FROM tb_chat_wa)")
-        duckdb_conn.execute(f"COPY tb_chat_wa TO '{path}tb_chat_wa.parquet' (FORMAT PARQUET)")
+    pq = f"""SELECT * FROM read_parquet('{path}tb_chat_wa.parquet')"""
+    exist_pq = duckdb_conn.execute(pq).fetchdf()
+    df_new = duckdb_conn.execute(f"""
+        SELECT * FROM df
+        WHERE id NOT IN (SELECT id FROM exist_pq)
+    """).fetchdf()
+    df_combined = pd.concat([exist_pq, df_new], ignore_index=True)
+    duckdb_conn.register('tb_chat_wa', df_combined)
+    
+        # duckdb_conn.execute("INSERT INTO tb_chat_wa SELECT * FROM tb_chat_wa_view WHERE nama NOT IN (SELECT nama FROM tb_chat_wa) AND no_hp NOT IN (SELECT no_hp FROM tb_chat_wa) AND tanggal NOT IN (SELECT CAST(tanggal AS VARCHAR) FROM tb_chat_wa)")
+    duckdb_conn.execute(f"COPY tb_chat_wa TO '{path}tb_chat_wa.parquet' (FORMAT PARQUET)")
     
     duckdb_conn.close()
 
 
 
-async def sum_wa():
-    path = s3_path(transaction = None)
+async def sum_wa(bucket):
+    path = s3_path(bucket, None)
     tb_path = f"{path}tb_chat_wa.parquet"
     duckdb_conn = get_duckdb_connection()
     query = f"""
@@ -202,15 +283,15 @@ async def sum_wa():
             FROM (
                 SELECT DISTINCT ON (no_hp, nama)
                 no_hp, nama, tanggal, TRIM(CASE
-                    WHEN EXTRACT(YEAR FROM age(NOW(), tanggal)) > 0 THEN EXTRACT(YEAR FROM age(NOW(), tanggal)) || ' tahun '
+                    WHEN EXTRACT(YEAR FROM age(NOW(), CAST(tanggal AS TIMESTAMP))) > 0 THEN EXTRACT(YEAR FROM age(NOW(), CAST(tanggal AS TIMESTAMP))) || ' tahun '
                     ELSE ''
                     END ||
                     CASE
-                    WHEN EXTRACT(MONTH FROM age(NOW(), tanggal)) > 0 THEN EXTRACT(MONTH FROM age(NOW(), tanggal)) || ' bulan '
+                    WHEN EXTRACT(MONTH FROM age(NOW(), CAST(tanggal AS TIMESTAMP))) > 0 THEN EXTRACT(MONTH FROM age(NOW(), CAST(tanggal AS TIMESTAMP))) || ' bulan '
                     ELSE ''
                     END ||
                     CASE
-                    WHEN EXTRACT(DAY FROM age(NOW(), tanggal)) > 0 THEN EXTRACT(DAY FROM age(NOW(), tanggal)) || ' hari '
+                    WHEN EXTRACT(DAY FROM age(NOW(), CAST(tanggal AS TIMESTAMP))) > 0 THEN EXTRACT(DAY FROM age(NOW(), CAST(tanggal AS TIMESTAMP))) || ' hari '
                     ELSE '0 hari '
                     END
                 ) AS terakhir_dihubungi
@@ -226,17 +307,17 @@ async def sum_wa():
         'no_hp', 'nama', 'tanggal', 'terakhir_dihubungi'
     ])
     duckdb_conn.register('tb_sum_wa_view', df)
-    duckdb_conn.execute("""
-                    CREATE TABLE IF NOT EXISTS tb_sum_wa (
-                    no_hp varchar,
-                    nama varchar,
-                    tanggal datetime,
-                    terakhir_dihubungi varchar
-        )
-    """)
-    duckdb_conn.execute("DELETE FROM tb_sum_wa")
-    duckdb_conn.execute("INSERT INTO tb_sum_wa SELECT * FROM tb_sum_wa_view ")
-    duckdb_conn.execute(f"COPY tb_sum_wa TO '{path}tb_sum_wa.parquet' (FORMAT PARQUET)")
+    # duckdb_conn.execute("""
+    #                 CREATE TABLE IF NOT EXISTS tb_sum_wa (
+    #                 no_hp varchar,
+    #                 nama varchar,
+    #                 tanggal datetime,
+    #                 terakhir_dihubungi varchar
+    #     )
+    # """)
+    # duckdb_conn.execute("DELETE FROM tb_sum_wa")
+    # duckdb_conn.execute("INSERT INTO tb_sum_wa SELECT * FROM tb_sum_wa_view ")
+    duckdb_conn.execute(f"COPY tb_sum_wa_view TO '{path}tb_sum_wa.parquet' (FORMAT PARQUET)")
 
     if len(summ) > 0 :
         trunc = """ TRUNCATE TABLE tb_sum_wa;"""
@@ -245,7 +326,7 @@ async def sum_wa():
         conn.commit()
         for s in summ:
             query = SumWa.insert().values(
-                no_hp = s[0],
+                no_hp = s[0].split('@')[0],
                 nama = s[1],
                 tanggal = s[2],
                 terakhir_dihubungi = s[3],
@@ -255,8 +336,8 @@ async def sum_wa():
             conn.commit()
     duckdb_conn.close()
     
-async def sum_average_sales():
-    path = s3_path(transaction = None)
+async def sum_average_sales(bucket):
+    path = s3_path(bucket, None)
     tb_path = f"{path}tb_transaksi.parquet"
     duckdb_conn = get_duckdb_connection()
     query = f"""
@@ -268,9 +349,9 @@ async def sum_average_sales():
         END AS kuantitas, x.jumlah_transaksi, x.avg_bill, ROUND(AVG(x.jumlah_produk),2) avg_basket
         FROM
         (
-        SELECT strftime(tgl_transaksi, '%Y %m') AS tgl, tahun, provinsi, store, SUM(kuantitas) kuantitas, 
-        SUM(harga) total_harga, COUNT(*) jumlah_transaksi, 
-        COUNT(model) jumlah_produk, ROUND(AVG(harga),2) avg_bill, (COUNT(model) / COUNT(*)) avg_basket
+        SELECT strftime(tgl_transaksi, '%Y %m') AS tgl, tahun, provinsi, store, SUM(kuantitas::INTEGER) kuantitas, 
+        SUM(harga::INTEGER) total_harga, COUNT(*) jumlah_transaksi, 
+        COUNT(model) jumlah_produk, ROUND(AVG(harga::INTEGER),2) avg_bill, (COUNT(model) / COUNT(*)) avg_basket
         FROM read_parquet('{tb_path}')
         WHERE provinsi IS NOT NULL
         GROUP BY 1,2,3,4
@@ -284,22 +365,22 @@ async def sum_average_sales():
         'kuantitas', 'jumlah_transaksi', 'avg_bill', 'avg_basket'
     ])
     duckdb_conn.register('tb_sum_average_sales_view', df)
-    duckdb_conn.execute("""
-                    CREATE TABLE IF NOT EXISTS tb_sum_average_sales (
-                    tanggal varchar,
-                    tahun varchar,
-                    provinsi varchar,
-                    channel varchar,
-                    total_harga int8,
-                    kuantitas int4,
-                    jumlah_transaksi int8,
-                    avg_bill float4,
-                    avg_basket float4,
-        )
-    """)
-    duckdb_conn.execute("DELETE FROM tb_sum_average_sales")
-    duckdb_conn.execute("INSERT INTO tb_sum_average_sales SELECT * FROM tb_sum_average_sales_view ")
-    duckdb_conn.execute(f"COPY tb_sum_average_sales TO '{path}tb_sum_average_sales.parquet' (FORMAT PARQUET)")
+    # duckdb_conn.execute("""
+    #                 CREATE TABLE IF NOT EXISTS tb_sum_average_sales (
+    #                 tanggal varchar,
+    #                 tahun varchar,
+    #                 provinsi varchar,
+    #                 channel varchar,
+    #                 total_harga int8,
+    #                 kuantitas int4,
+    #                 jumlah_transaksi int8,
+    #                 avg_bill float4,
+    #                 avg_basket float4,
+    #     )
+    # """)
+    # duckdb_conn.execute("DELETE FROM tb_sum_average_sales")
+    # duckdb_conn.execute("INSERT INTO tb_sum_average_sales SELECT * FROM tb_sum_average_sales_view ")
+    duckdb_conn.execute(f"COPY tb_sum_average_sales_view TO '{path}tb_sum_average_sales.parquet' (FORMAT PARQUET)")
     if len(summ) > 0 :
         trunc = """ TRUNCATE TABLE tb_sum_average_sales;"""
         textQuery = text(trunc)
@@ -322,16 +403,16 @@ async def sum_average_sales():
             conn.commit()
     duckdb_conn.close()
 
-async def sum_customer():
-    path = s3_path(transaction = None)
+async def sum_customer(bucket):
+    path = s3_path(bucket, None)
     tb_path = f"{path}tb_transaksi.parquet"
     duckdb_conn = get_duckdb_connection()
     query = f"""
-        SELECT nama AS customer, tahun, provinsi, SUM(harga) total, CASE 
-            WHEN SUM(kuantitas) IS NULL THEN
+        SELECT nama AS customer, tahun, provinsi, SUM(harga::INTEGER) total, CASE 
+            WHEN SUM(kuantitas::INTEGER) IS NULL THEN
                 0
             ELSE
-                SUM(kuantitas)
+                SUM(kuantitas::INTEGER)
         END AS kuantitas
         FROM read_parquet('{tb_path}')
         WHERE nama IS NOT NULL AND provinsi IS NOT NULL
@@ -342,18 +423,18 @@ async def sum_customer():
         'customer', 'tahun', 'provinsi', 'total', 'kuantitas'
     ])
     duckdb_conn.register('tb_sum_customer_view', df)
-    duckdb_conn.execute("""
-                    CREATE TABLE IF NOT EXISTS tb_sum_customer (
-                    customer varchar,
-                    tahun varchar,
-                    provinsi varchar,
-                    total int8,
-                    kuantitas int8
-        )
-    """)
-    duckdb_conn.execute("DELETE FROM tb_sum_customer")
-    duckdb_conn.execute("INSERT INTO tb_sum_customer SELECT * FROM tb_sum_customer_view ")
-    duckdb_conn.execute(f"COPY tb_sum_customer TO '{path}tb_sum_customer.parquet' (FORMAT PARQUET)")
+    # duckdb_conn.execute("""
+    #                 CREATE TABLE IF NOT EXISTS tb_sum_customer (
+    #                 customer varchar,
+    #                 tahun varchar,
+    #                 provinsi varchar,
+    #                 total int8,
+    #                 kuantitas int8
+    #     )
+    # """)
+    # duckdb_conn.execute("DELETE FROM tb_sum_customer")
+    # duckdb_conn.execute("INSERT INTO tb_sum_customer SELECT * FROM tb_sum_customer_view ")
+    duckdb_conn.execute(f"COPY tb_sum_customer_view TO '{path}tb_sum_customer.parquet' (FORMAT PARQUET)")
     
     if len(summ) > 0 :
         trunc = """ TRUNCATE TABLE tb_sum_customer;"""
@@ -373,8 +454,8 @@ async def sum_customer():
             conn.commit()
     duckdb_conn.close()
 
-async def sum_customer_follower():
-    path = s3_path(transaction = None)
+async def sum_customer_follower(bucket):
+    path = s3_path(bucket, None)
     tb_path = f"{path}tb_transaksi.parquet"
     duckdb_conn = get_duckdb_connection()
     query = f"""
@@ -392,21 +473,29 @@ async def sum_customer_follower():
     ])
     
     duckdb_conn.register('tb_sum_customer_follower_view', df)
-    duckdb_conn.execute("""
-                    CREATE TABLE IF NOT EXISTS tb_sum_customer_follower (
-                    nama varchar,
-	                instagram varchar,
-                    follower int8
-        )
-    """)
+    # duckdb_conn.execute("""
+    #                 CREATE TABLE IF NOT EXISTS tb_sum_customer_follower (
+    #                 nama varchar,
+	#                 instagram varchar,
+    #                 follower int8
+    #     )
+    # """)
 
-    duckdb_conn.execute("INSERT INTO tb_sum_customer_follower SELECT * FROM tb_sum_customer_follower_view WHERE nama NOT IN (SELECT nama FROM tb_sum_customer_follower) AND instagram NOT IN (SELECT instagram FROM tb_sum_customer_follower) ")
-    duckdb_conn.execute(f"COPY tb_sum_customer_follower TO '{path}tb_sum_customer_follower.parquet' (FORMAT PARQUET)")
+    # duckdb_conn.execute("INSERT INTO tb_sum_customer_follower SELECT * FROM tb_sum_customer_follower_view WHERE nama NOT IN (SELECT nama FROM tb_sum_customer_follower) AND instagram NOT IN (SELECT instagram FROM tb_sum_customer_follower) ")
+    pq = f"""SELECT * FROM read_parquet('{path}tb_sum_customer_follower.parquet')"""
+    exist_pq = duckdb_conn.execute(pq).fetchdf()
+    df_new = duckdb_conn.execute(f"""
+        SELECT * FROM df
+        WHERE nama NOT IN (SELECT nama FROM exist_pq)
+        AND instagram NOT IN (SELECT instagram FROM exist_pq)
+    """).fetchdf()
+    df_combined = pd.concat([exist_pq, df_new], ignore_index=True)
+    duckdb_conn.register('tb_follower', df_combined)
 
-    notExist = duckdb_conn.execute("SELECT nama, instagram, follower FROM tb_sum_customer_follower_view WHERE nama NOT IN (SELECT nama FROM tb_sum_customer_follower) AND instagram NOT IN (SELECT instagram FROM tb_sum_customer_follower) ").fetchall()
-
-    if len(notExist) > 0 :
-        for s in notExist:
+    duckdb_conn.execute(f"COPY tb_follower TO '{path}tb_sum_customer_follower.parquet' (FORMAT PARQUET)")
+    
+    if len(df_new) > 0 :
+        for s in df_new:
             query = SumCustomerFollower.insert().values(
                 nama = s[0],
                 instagram = s[1],
@@ -418,16 +507,16 @@ async def sum_customer_follower():
 
     duckdb_conn.close()
 
-async def sum_model():
-    path = s3_path(transaction = None)
+async def sum_model(bucket):
+    path = s3_path(bucket, None)
     tb_path = f"{path}tb_transaksi.parquet"
     duckdb_conn = get_duckdb_connection()
     query = f"""
         SELECT model, tahun, provinsi, COUNT(DISTINCT nama) AS total, CASE 
-            WHEN SUM(kuantitas) IS NULL THEN
+            WHEN SUM(kuantitas::INTEGER) IS NULL THEN
                 0
             ELSE
-                SUM(kuantitas)
+                SUM(kuantitas::INTEGER)
         END AS kuantitas
         FROM read_parquet('{tb_path}')
         WHERE nama IS NOT NULL AND provinsi IS NOT NULL
@@ -440,18 +529,18 @@ async def sum_model():
         'model', 'tahun', 'provinsi', 'total', 'kuantitas'
     ])
     duckdb_conn.register('tb_sum_model_view', df)
-    duckdb_conn.execute("""
-                    CREATE TABLE IF NOT EXISTS tb_sum_model (
-                    model varchar,
-                    tahun varchar,
-                    provinsi varchar,
-                    total int8,
-                    kuantitas int4
-        )
-    """)
-    duckdb_conn.execute("DELETE FROM tb_sum_model")
-    duckdb_conn.execute("INSERT INTO tb_sum_model SELECT * FROM tb_sum_model_view ")
-    duckdb_conn.execute(f"COPY tb_sum_model TO '{path}tb_sum_model.parquet' (FORMAT PARQUET)")
+    # duckdb_conn.execute("""
+    #                 CREATE TABLE IF NOT EXISTS tb_sum_model (
+    #                 model varchar,
+    #                 tahun varchar,
+    #                 provinsi varchar,
+    #                 total int8,
+    #                 kuantitas int4
+    #     )
+    # """)
+    # duckdb_conn.execute("DELETE FROM tb_sum_model")
+    # duckdb_conn.execute("INSERT INTO tb_sum_model SELECT * FROM tb_sum_model_view ")
+    duckdb_conn.execute(f"COPY tb_sum_model_view TO '{path}tb_sum_model.parquet' (FORMAT PARQUET)")
 
     if len(summ) > 0 :
         trunc = """ TRUNCATE TABLE tb_sum_model;"""
@@ -471,16 +560,16 @@ async def sum_model():
             conn.commit()
     duckdb_conn.close()
 
-async def sum_region():
-    path = s3_path(transaction = None)
+async def sum_region(bucket):
+    path = s3_path(bucket, None)
     tb_path = f"{path}tb_transaksi.parquet"
     duckdb_conn = get_duckdb_connection()
     query = f"""
         SELECT provinsi, tahun, COUNT(DISTINCT nama) AS total, CASE 
-            WHEN SUM(kuantitas) IS NULL THEN
+            WHEN SUM(kuantitas::INTEGER) IS NULL THEN
                 0
             ELSE
-                SUM(kuantitas)
+                SUM(kuantitas::INTEGER)
         END AS kuantitas
         FROM read_parquet('{tb_path}')
         WHERE nama IS NOT NULL AND provinsi IS NOT NULL
@@ -492,17 +581,17 @@ async def sum_region():
         'provinsi', 'tahun', 'total', 'kuantitas'
     ])
     duckdb_conn.register('tb_sum_region_view', df)
-    duckdb_conn.execute("""
-                    CREATE TABLE IF NOT EXISTS tb_sum_region (
-                    provinsi varchar,
-                    tahun varchar,
-                    total int8,
-                    kuantitas int4
-        )
-    """)
-    duckdb_conn.execute("DELETE FROM tb_sum_region")
-    duckdb_conn.execute("INSERT INTO tb_sum_region SELECT * FROM tb_sum_region_view ")
-    duckdb_conn.execute(f"COPY tb_sum_region TO '{path}tb_sum_region.parquet' (FORMAT PARQUET)")
+    # duckdb_conn.execute("""
+    #                 CREATE TABLE IF NOT EXISTS tb_sum_region (
+    #                 provinsi varchar,
+    #                 tahun varchar,
+    #                 total int8,
+    #                 kuantitas int4
+    #     )
+    # """)
+    # duckdb_conn.execute("DELETE FROM tb_sum_region")
+    # duckdb_conn.execute("INSERT INTO tb_sum_region SELECT * FROM tb_sum_region_view ")
+    duckdb_conn.execute(f"COPY tb_sum_region_view TO '{path}tb_sum_region.parquet' (FORMAT PARQUET)")
 
     if len(summ) > 0 :
         trunc = """ TRUNCATE TABLE tb_sum_region;"""
@@ -521,17 +610,17 @@ async def sum_region():
             conn.commit()
     duckdb_conn.close()
 
-async def sum_sales_trend():
-    path = s3_path(transaction = None)
+async def sum_sales_trend(bucket):
+    path = s3_path(bucket, None)
     tb_path = f"{path}tb_transaksi.parquet"
     duckdb_conn = get_duckdb_connection()
     query = f"""
         SELECT strftime(tgl_transaksi, '%Y %B') bulan, tahun, 
-        provinsi, sum(harga) total, CASE 
-            WHEN SUM(kuantitas) IS NULL THEN
+        provinsi, sum(harga::INTEGER) total, CASE 
+            WHEN SUM(kuantitas::INTEGER) IS NULL THEN
                 0
             ELSE
-                SUM(kuantitas)
+                SUM(kuantitas::INTEGER)
         END AS kuantitas
         FROM read_parquet('{tb_path}') 
         WHERE provinsi IS NOT NULL
@@ -543,18 +632,18 @@ async def sum_sales_trend():
         'bulan', 'tahun', 'provinsi', 'total', 'kuantitas'
     ])
     duckdb_conn.register('tb_sum_sales_trend_view', df)
-    duckdb_conn.execute("""
-                    CREATE TABLE IF NOT EXISTS tb_sum_sales_trend (
-                    bulan varchar,
-                    tahun varchar,
-                    provinsi varchar,
-                    total int8,
-                    kuantitas int4
-        )
-    """)
-    duckdb_conn.execute("DELETE FROM tb_sum_sales_trend")
-    duckdb_conn.execute("INSERT INTO tb_sum_sales_trend SELECT * FROM tb_sum_sales_trend_view ")
-    duckdb_conn.execute(f"COPY tb_sum_sales_trend TO '{path}tb_sum_sales_trend.parquet' (FORMAT PARQUET)")
+    # duckdb_conn.execute("""
+    #                 CREATE TABLE IF NOT EXISTS tb_sum_sales_trend (
+    #                 bulan varchar,
+    #                 tahun varchar,
+    #                 provinsi varchar,
+    #                 total int8,
+    #                 kuantitas int4
+    #     )
+    # """)
+    # duckdb_conn.execute("DELETE FROM tb_sum_sales_trend")
+    # duckdb_conn.execute("INSERT INTO tb_sum_sales_trend SELECT * FROM tb_sum_sales_trend_view ")
+    duckdb_conn.execute(f"COPY tb_sum_sales_trend_view TO '{path}tb_sum_sales_trend.parquet' (FORMAT PARQUET)")
 
     if len(summ) > 0 :
         trunc = """ TRUNCATE TABLE tb_sum_sales_trend;"""
@@ -574,12 +663,12 @@ async def sum_sales_trend():
             conn.commit()
     duckdb_conn.close()
 
-async def sum_sales_trend_pertanggal():
-    path = s3_path(transaction = None)
+async def sum_sales_trend_pertanggal(bucket):
+    path = s3_path(bucket, None)
     tb_path = f"{path}tb_transaksi.parquet"
     duckdb_conn = get_duckdb_connection()
     query = f"""
-        SELECT tgl_transaksi, model, store, provinsi, sum(harga) total_harga
+        SELECT tgl_transaksi, model, store, provinsi, sum(harga::INTEGER) total_harga
         FROM read_parquet('{tb_path}') 
         WHERE provinsi IS NOT NULL
         GROUP BY 1,2,3,4
@@ -590,18 +679,18 @@ async def sum_sales_trend_pertanggal():
         'tgl_transaksi', 'model', 'store', 'provinsi', 'total_harga'
     ])
     duckdb_conn.register('tb_sum_sales_trend_pertanggal_view', df)
-    duckdb_conn.execute("""
-                    CREATE TABLE IF NOT EXISTS tb_sum_sales_trend_pertanggal (
-                    tgl_transaksi date,
-                    model varchar,
-                    store varchar,
-                    provinsi varchar,
-                    total_harga int8
-        )
-    """)
-    duckdb_conn.execute("DELETE FROM tb_sum_sales_trend_pertanggal")
-    duckdb_conn.execute("INSERT INTO tb_sum_sales_trend_pertanggal SELECT * FROM tb_sum_sales_trend_pertanggal_view ")
-    duckdb_conn.execute(f"COPY tb_sum_sales_trend_pertanggal TO '{path}tb_sum_sales_trend_pertanggal.parquet' (FORMAT PARQUET)")
+    # duckdb_conn.execute("""
+    #                 CREATE TABLE IF NOT EXISTS tb_sum_sales_trend_pertanggal (
+    #                 tgl_transaksi date,
+    #                 model varchar,
+    #                 store varchar,
+    #                 provinsi varchar,
+    #                 total_harga int8
+    #     )
+    # """)
+    # duckdb_conn.execute("DELETE FROM tb_sum_sales_trend_pertanggal")
+    # duckdb_conn.execute("INSERT INTO tb_sum_sales_trend_pertanggal SELECT * FROM tb_sum_sales_trend_pertanggal_view ")
+    duckdb_conn.execute(f"COPY tb_sum_sales_trend_pertanggal_view TO '{path}tb_sum_sales_trend_pertanggal.parquet' (FORMAT PARQUET)")
 
     if len(summ) > 0 :
         trunc = """ TRUNCATE TABLE tb_sum_sales_trend_pertanggal;"""
@@ -621,16 +710,16 @@ async def sum_sales_trend_pertanggal():
             conn.commit()
     duckdb_conn.close()
 
-async def sum_store():
-    path = s3_path(transaction = None)
+async def sum_store(bucket):
+    path = s3_path(bucket, None)
     tb_path = f"{path}tb_transaksi.parquet"
     duckdb_conn = get_duckdb_connection()
     query = f"""
-        SELECT tgl_transaksi, store AS channel, tahun, provinsi, SUM(harga) total, COUNT(*) jumlah, CASE 
-            WHEN SUM(kuantitas) IS NULL THEN
+        SELECT tgl_transaksi, store AS channel, tahun, provinsi, SUM(harga::INTEGER) total, COUNT(*) jumlah, CASE 
+            WHEN SUM(kuantitas::INTEGER) IS NULL THEN
                 0
             ELSE
-                SUM(kuantitas)
+                SUM(kuantitas::INTEGER)
         END AS kuantitas
         FROM read_parquet('{tb_path}')
         WHERE provinsi IS NOT NULL
@@ -642,20 +731,20 @@ async def sum_store():
         'tgl_transaksi', 'channel', 'tahun', 'provinsi', 'total', 'jumlah', 'kuantitas'
     ])
     duckdb_conn.register('tb_sum_store_view', df)
-    duckdb_conn.execute("""
-                    CREATE TABLE IF NOT EXISTS tb_sum_store (
-                    tgl_transaksi date,
-                    channel varchar,
-                    tahun varchar,
-                    provinsi varchar,
-                    total int8,
-                    jumlah int8,
-                    kuantitas int4
-        )
-    """)
-    duckdb_conn.execute("DELETE FROM tb_sum_store")
-    duckdb_conn.execute("INSERT INTO tb_sum_store SELECT * FROM tb_sum_store_view ")
-    duckdb_conn.execute(f"COPY tb_sum_store TO '{path}tb_sum_store.parquet' (FORMAT PARQUET)")
+    # duckdb_conn.execute("""
+    #                 CREATE TABLE IF NOT EXISTS tb_sum_store (
+    #                 tgl_transaksi date,
+    #                 channel varchar,
+    #                 tahun varchar,
+    #                 provinsi varchar,
+    #                 total int8,
+    #                 jumlah int8,
+    #                 kuantitas int4
+    #     )
+    # """)
+    # duckdb_conn.execute("DELETE FROM tb_sum_store")
+    # duckdb_conn.execute("INSERT INTO tb_sum_store SELECT * FROM tb_sum_store_view ")
+    duckdb_conn.execute(f"COPY tb_sum_store_view TO '{path}tb_sum_store.parquet' (FORMAT PARQUET)")
     
     if len(summ) > 0 :
         trunc = """ TRUNCATE TABLE tb_sum_store;"""
@@ -678,16 +767,16 @@ async def sum_store():
 
     duckdb_conn.close()
 
-async def sum_top_produk():
-    path = s3_path(transaction = None)
+async def sum_top_produk(bucket):
+    path = s3_path(bucket, None)
     tb_path = f"{path}tb_transaksi.parquet"
     duckdb_conn = get_duckdb_connection()
     query = f"""
-        SELECT model AS produk, provinsi, store, tahun, SUM(harga) total_harga, COUNT(*) jumlah, CASE 
-            WHEN SUM(kuantitas) IS NULL THEN
+        SELECT model AS produk, provinsi, store, tahun, SUM(harga::INTEGER) total_harga, COUNT(*) jumlah, CASE 
+            WHEN SUM(kuantitas::INTEGER) IS NULL THEN
                 0
             ELSE
-                SUM(kuantitas)
+                SUM(kuantitas::INTEGER)
         END AS kuantitas
         FROM read_parquet('{tb_path}') 
         WHERE model IS NOT NULL AND provinsi IS NOT NULL
@@ -698,20 +787,20 @@ async def sum_top_produk():
         'produk', 'provinsi', 'store', 'tahun', 'total_harga', 'jumlah', 'kuantitas'
     ])
     duckdb_conn.register('tb_sum_top_produk_view', df)
-    duckdb_conn.execute("""
-                    CREATE TABLE IF NOT EXISTS tb_sum_top_produk (
-                    produk varchar,
-                    provinsi varchar,
-                    store varchar,
-                    tahun varchar,
-                    total_harga int8,
-                    jumlah int8,
-                    kuantitas int4
-        )
-    """)
-    duckdb_conn.execute("DELETE FROM tb_sum_top_produk")
-    duckdb_conn.execute("INSERT INTO tb_sum_top_produk SELECT * FROM tb_sum_top_produk_view ")
-    duckdb_conn.execute(f"COPY tb_sum_top_produk TO '{path}tb_sum_top_produk.parquet' (FORMAT PARQUET)")
+    # duckdb_conn.execute("""
+    #                 CREATE TABLE IF NOT EXISTS tb_sum_top_produk (
+    #                 produk varchar,
+    #                 provinsi varchar,
+    #                 store varchar,
+    #                 tahun varchar,
+    #                 total_harga int8,
+    #                 jumlah int8,
+    #                 kuantitas int4
+    #     )
+    # """)
+    # duckdb_conn.execute("DELETE FROM tb_sum_top_produk")
+    # duckdb_conn.execute("INSERT INTO tb_sum_top_produk SELECT * FROM tb_sum_top_produk_view ")
+    duckdb_conn.execute(f"COPY tb_sum_top_produk_view TO '{path}tb_sum_top_produk.parquet' (FORMAT PARQUET)")
 
     if len(summ) > 0 :
         trunc = """ TRUNCATE TABLE tb_sum_top_produk;"""
