@@ -21,10 +21,6 @@ import os
 import boto3
 from botocore.exceptions import ClientError
 
-import pyarrow as pa
-import pyarrow.parquet as pq
-import s3fs
-
 # Retrieve AWS credentials from environment variables
 aws_access_key = os.getenv("ACCESS_KEY")
 aws_secret_key = os.getenv("SECRET_KEY")
@@ -61,7 +57,6 @@ def generate_bucket_name(user_group: str) -> str:
 parquet_file_name = "TRANSACTION/transaction.parquet"  # S3 folder is now "TRANSACTION"
 
 
-
 @router.post("/", status_code=status.HTTP_200_OK)
 def create_transaction(
     transaction: TransactionCreate, 
@@ -69,18 +64,24 @@ def create_transaction(
 ):
     try:
         print("Starting transaction creation process...")
+        
+        # 1. Create a DuckDB connection
+        ()
+        print("AWS S3 credentials configured.")
 
-        # 1. AWS S3 credentials and path configuration
-        bucket_name = generate_bucket_name(current_user.group)
+        # 4. Form the S3 path
+        user_group = current_user.group
+        bucket_name = generate_bucket_name(user_group) 
         s3_path = f"s3://{bucket_name}/{parquet_file_name}"
 
-        # 2. Create S3 client and ensure the bucket exists
+        # 5. Ensure the S3 bucket exists, create if it doesn't
         s3_client = boto3.client('s3', aws_access_key_id=aws_access_key, aws_secret_access_key=aws_secret_key, region_name=aws_region)
 
         try:
             s3_client.head_bucket(Bucket=bucket_name)
             print(f"Bucket {bucket_name} exists.")
         except ClientError:
+            # If the bucket does not exist, create it
             print(f"Bucket {bucket_name} does not exist. Creating bucket.")
             try:
                 s3_client.create_bucket(
@@ -89,18 +90,19 @@ def create_transaction(
                 )
                 print(f"Bucket {bucket_name} created successfully.")
             except ClientError as e:
+                print(f"Failed to create bucket: {str(e)}")
                 raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to create S3 bucket")
 
-        # 3. Try to read the existing Parquet file from S3
-        fs = s3fs.S3FileSystem(key=aws_access_key, secret=aws_secret_key)
+        # 6. Try to read the Parquet file from S3
         try:
-            existing_data_df = pd.read_parquet(s3_path, filesystem=fs)
+            existing_data_df = duckdb_conn.execute(f"SELECT * FROM read_parquet('{s3_path}')").fetchdf()
             print("Existing data loaded from S3.")
-        except Exception:
+        except Exception as e:
+            # If the file does not exist or there is an error reading it, start fresh
             print("Parquet file not found or unreadable. Creating a new one.")
             existing_data_df = pd.DataFrame()
 
-        # 4. Generate a new transaction ID
+        # 7. Generate a new transaction ID
         if not existing_data_df.empty:
             last_transaction = existing_data_df.iloc[-1]
             last_num_id = int(last_transaction['transaction_id'][2:6])
@@ -108,25 +110,19 @@ def create_transaction(
         else:
             new_num_id = '0001'
 
-        print("transaction_dt.st", transaction.transaction_dt, " type", type(transaction.transaction_dt))
         transaction_date_str = transaction.transaction_dt.strftime('%d%m%y')
         channel_code = transaction.transaction_channel[:2].upper()
         transaction_id = f'TT{new_num_id}{transaction_date_str}{channel_code}'
         
         print(f"Generated transaction ID: {transaction_id}")
-
-        print("Type of 'transaction_dt' in the first row:", type(existing_data_df.iloc[0]['transaction_dt']))
-        print("Type of 'transaction_dt' new ", type(transaction.transaction_dt))
-        transaction_dt_converted = pd.to_datetime(transaction.transaction_dt)
-
-
-        # 5. Create a DataFrame for the new transaction
+        
+        # 8. Create a DataFrame for the new transaction
         new_transaction_df = pd.DataFrame([{
             'transaction_id': transaction_id,
             'transaction_channel': transaction.transaction_channel,
-            'transaction_dt': transaction_dt_converted,
+            'transaction_dt': transaction.transaction_dt,
             'model_product': transaction.model_product,
-            'kuantitas': transaction.kuantitas,
+            'kuantitas':transaction.kuantitas,
             'price_product': transaction.price_product,
             'no_hp_cust': transaction.no_hp_cust,
             'name_cust': transaction.name_cust,
@@ -139,28 +135,32 @@ def create_transaction(
             'updated_by': current_user.username,
             'updated_dt': transaction.updated_dt.strftime('%Y-%m-%d %H:%M:%S'),  # Convert to custom string format,
         }])
+        print("DataFrame content:", new_transaction_df)
+        print("DataFrame created from transaction data.")
 
-        print("Transaction Date (transaction_dt):", type(new_transaction_df['transaction_dt'].iloc[0]))
-
-        # 6. Combine the new transaction data with the existing data
+        # 9. Combine the new transaction data with the existing data
         if not existing_data_df.empty:
             updated_df = pd.concat([existing_data_df, new_transaction_df], ignore_index=True)
         else:
             updated_df = new_transaction_df
 
         print("New transaction appended to existing data.")
+        
+        # 10. Register the combined DataFrame as a table in DuckDB
+        duckdb_conn.register("updated_transaction_df", updated_df)
+        print("Combined DataFrame registered as table in DuckDB.")
 
-        # 7. Write the updated DataFrame back to S3 in Parquet format using PyArrow
-        updated_df.to_parquet(s3_path, engine='pyarrow', index=False, filesystem=fs)
-        print(f"Parquet file updated and saved to S3 at {s3_path}")
+        # 11. Write the combined DataFrame back to S3 in Parquet format using COPY
+        duckdb_conn.execute(f"COPY updated_transaction_df TO '{s3_path}' (FORMAT 'parquet');")
+        print(f"Parquet file updated and saved to S3: {s3_path}")
 
         print("Transaction process completed successfully.")
+        
         return {"status": "Transaction successfully added to S3"}
 
     except Exception as e:
         print(f"Internal Server Error: {str(e)}")
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Internal Server Error")
-
 
 @router.get("/", status_code=status.HTTP_200_OK)
 def read_transactions(
