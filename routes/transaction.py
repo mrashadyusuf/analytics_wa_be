@@ -10,7 +10,7 @@ from auth import get_current_user, User
 
 router = APIRouter()
 
-
+from datetime import date, datetime
 import pandas as pd
 import duckdb
 from io import BytesIO
@@ -58,7 +58,35 @@ duckdb_conn = get_duckdb_connection()
 def generate_bucket_name(user_group: str) -> str:
     return f'customer-{user_group.lower()}'
 
-parquet_file_name = "TRANSACTION/transaction.parquet"  # S3 folder is now "TRANSACTION"
+prefix_parquet_file_name= "TRANSACTION/transaction-"
+# parquet_file_name = prefix_parquet_file_name+ f"{ datetime.now()}.parquet"  # S3 folder is now "TRANSACTION"
+
+def generate_parquet_file_name() -> str:
+    return prefix_parquet_file_name+ f"{ datetime.now()}.parquet"
+
+
+
+# Separate function to get the latest file from S3 based on the prefix
+def get_latest_transaction_file_from_s3(bucket_name: str):
+    # 1. AWS S3 setup with boto3 client
+    s3_client = boto3.client('s3', aws_access_key_id=aws_access_key, aws_secret_access_key=aws_secret_key, region_name=aws_region)
+    
+    # 2. List all files in the bucket with the specified prefix
+    response = s3_client.list_objects_v2(Bucket=bucket_name, Prefix=prefix_parquet_file_name)
+    files = response.get('Contents', [])
+
+    print("S3 response:")
+
+    # 3. Find the file with the most recent LastModified timestamp
+    if not files:
+        print("No files found")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No files found in the bucket.")
+
+    latest_file = max(files, key=lambda f: f['LastModified'])  # Find the file with the latest LastModified
+    latest_file_key = latest_file['Key']  # Get the S3 key of the latest file
+
+    print(f"Latest file selected: {latest_file_key}")
+    return latest_file_key  # Return the key of the latest file
 
 
 
@@ -69,9 +97,17 @@ def create_transaction(
 ):
     try:
         print("Starting transaction creation process...")
+        user_group = current_user.group
 
         # 1. AWS S3 credentials and path configuration
-        bucket_name = generate_bucket_name(current_user.group)
+        bucket_name = generate_bucket_name(user_group)
+
+        # variable to get latest parquet file
+        latest_parquet_file_name = get_latest_transaction_file_from_s3(bucket_name)
+        s3_path_latest= f"s3://{bucket_name}/{latest_parquet_file_name}"
+
+        # variable to create new  parquet file
+        parquet_file_name =  generate_parquet_file_name()
         s3_path = f"s3://{bucket_name}/{parquet_file_name}"
 
         # 2. Create S3 client and ensure the bucket exists
@@ -94,7 +130,7 @@ def create_transaction(
         # 3. Try to read the existing Parquet file from S3
         fs = s3fs.S3FileSystem(key=aws_access_key, secret=aws_secret_key)
         try:
-            existing_data_df = pd.read_parquet(s3_path, filesystem=fs)
+            existing_data_df = pd.read_parquet(s3_path_latest, filesystem=fs)
             print("Existing data loaded from S3.")
         except Exception:
             print("Parquet file not found or unreadable. Creating a new one.")
@@ -115,7 +151,7 @@ def create_transaction(
         
         print(f"Generated transaction ID: {transaction_id}")
 
-        print("Type of 'transaction_dt' in the first row:", type(existing_data_df.iloc[0]['transaction_dt']))
+        # print("Type of 'transaction_dt' in the first row:", type(existing_data_df.iloc[0]['transaction_dt']))
         print("Type of 'transaction_dt' new ", type(transaction.transaction_dt))
         transaction_dt_converted = pd.to_datetime(transaction.transaction_dt)
 
@@ -162,83 +198,186 @@ def create_transaction(
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Internal Server Error")
 
 
+@router.post("/group", status_code=status.HTTP_200_OK)
+def create_transactions_in_batch(
+    transactions: List[TransactionCreate],  # Accept an array of transactions
+    current_user: User = Depends(get_current_user)  # JWT authentication
+):
+    try:
+        print("Starting batch transaction creation process...")
+        user_group = current_user.group
+
+        # 1. AWS S3 credentials and path configuration
+        bucket_name = generate_bucket_name(user_group)
+
+        # Variable to get the latest parquet file
+        latest_parquet_file_name = get_latest_transaction_file_from_s3(bucket_name)
+        s3_path_latest = f"s3://{bucket_name}/{latest_parquet_file_name}"
+
+        # Variable to create new parquet file
+        parquet_file_name = generate_parquet_file_name()
+        s3_path = f"s3://{bucket_name}/{parquet_file_name}"
+
+        # 2. Create S3 client and ensure the bucket exists
+        s3_client = boto3.client('s3', aws_access_key_id=aws_access_key, aws_secret_access_key=aws_secret_key, region_name=aws_region)
+
+        try:
+            s3_client.head_bucket(Bucket=bucket_name)
+            print(f"Bucket {bucket_name} exists.")
+        except ClientError:
+            print(f"Bucket {bucket_name} does not exist. Creating bucket.")
+            try:
+                s3_client.create_bucket(
+                    Bucket=bucket_name,
+                    CreateBucketConfiguration={'LocationConstraint': aws_region}
+                )
+                print(f"Bucket {bucket_name} created successfully.")
+            except ClientError as e:
+                raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to create S3 bucket")
+
+        # 3. Try to read the existing Parquet file from S3
+        fs = s3fs.S3FileSystem(key=aws_access_key, secret=aws_secret_key)
+        try:
+            existing_data_df = pd.read_parquet(s3_path_latest, filesystem=fs)
+            print("Existing data loaded from S3.")
+        except Exception:
+            print("Parquet file not found or unreadable. Creating a new one.")
+            existing_data_df = pd.DataFrame()
+
+        # 4. Initialize the sequence number
+        if not existing_data_df.empty:
+            # Get the last num_id from the last transaction in the existing data
+            last_transaction = existing_data_df.iloc[-1]
+            last_num_id = int(last_transaction['transaction_id'][2:6])
+        else:
+            last_num_id = 0  # Start with 0001 if there are no previous transactions
+
+        # 5. Process each transaction in the batch
+        new_transactions = []
+        for transaction in transactions:
+            # Increment the num_id for each transaction in the batch
+            last_num_id += 1
+            new_num_id = str(last_num_id).zfill(4)
+
+            # Format the transaction date to 'ddmmyy'
+            transaction_date_str = transaction.transaction_dt.strftime('%d%m%y')
+
+            # Extract the first two characters from the transaction channel
+            channel_code = transaction.transaction_channel[:2].upper()
+
+            # Construct the new transaction_id
+            transaction_id = f'TT{new_num_id}{transaction_date_str}{channel_code}'
+
+            print(f"Generated transaction ID: {transaction_id}")
+
+            transaction_dt_converted = pd.to_datetime(transaction.transaction_dt)
+
+            # Create a DataFrame for the new transaction
+            new_transaction_df = pd.DataFrame([{
+                'transaction_id': transaction_id,
+                'transaction_channel': transaction.transaction_channel,
+                'transaction_dt': transaction_dt_converted,
+                'model_product': transaction.model_product,
+                'kuantitas': transaction.kuantitas,
+                'price_product': transaction.price_product,
+                'no_hp_cust': transaction.no_hp_cust,
+                'name_cust': transaction.name_cust,
+                'city_cust': transaction.city_cust,
+                'prov_cust': transaction.prov_cust,
+                'address_cust': transaction.address_cust,
+                'instagram_cust': transaction.instagram_cust,
+                'created_by': current_user.username,
+                'created_dt': transaction.created_dt.strftime('%Y-%m-%d %H:%M:%S'),  # Convert to custom string format
+                'updated_by': current_user.username,
+                'updated_dt': transaction.updated_dt.strftime('%Y-%m-%d %H:%M:%S'),
+            }])
+
+            new_transactions.append(new_transaction_df)
+
+        # 6. Combine all the new transactions into a single DataFrame
+        new_transactions_df = pd.concat(new_transactions, ignore_index=True)
+
+        # 7. Combine the new transaction data with the existing data
+        if not existing_data_df.empty:
+            updated_df = pd.concat([existing_data_df, new_transactions_df], ignore_index=True)
+        else:
+            updated_df = new_transactions_df
+
+        print("New transactions appended to existing data.")
+
+        # 8. Write the updated DataFrame back to S3 in Parquet format using PyArrow
+        updated_df.to_parquet(s3_path, engine='pyarrow', index=False, filesystem=fs)
+        print(f"Parquet file updated and saved to S3 at {s3_path}")
+
+        print("Batch transaction process completed successfully.")
+        return {"status": "Batch transactions successfully added to S3"}
+
+    except Exception as e:
+        print(f"Internal Server Error: {str(e)}")
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Internal Server Error")
+
+
 @router.get("/", status_code=status.HTTP_200_OK)
 def read_transactions(
-    offset: int = 0,  # Changed parameter name from skip to offset
-    limit: int = 10, 
-    search: str = "",  # Added search parameter
+    offset: int = 0,  # Pagination offset
+    limit: int = 10,  # Pagination limit
+    search: str = "",  # Search query
     db: Session = Depends(get_db),  # This might not be needed, remove if not used elsewhere
     current_user: User = Depends(get_current_user)  # JWT authentication
 ):
     try:
         print("Starting transaction retrieval process...")
 
-        # 1. Create a DuckDB connection
-        ()
-        print("AWS S3 credentials configured.")
+        bucket_name = generate_bucket_name(current_user.group) 
+        latest_file_key = get_latest_transaction_file_from_s3(bucket_name)
+        print(f"Latest file selected: {latest_file_key}")
 
-        # 4. Form the S3 path
-        user_group = current_user.group
-        bucket_name = generate_bucket_name(user_group) 
-        s3_path = f"s3://{bucket_name}/{parquet_file_name}"
+
+
+        # 4. Form the S3 path for the latest file
+        s3_path = f"s3://{bucket_name}/{latest_file_key}"
 
         # 5. Load the Parquet file from S3 into a DataFrame
-        # Build the SQL query with filtering, sorting, and pagination
-        try:
-            # Initialize the base query
-            query = f"""
-            SELECT * FROM read_parquet('{s3_path}')
+        query = f"SELECT * FROM read_parquet('{s3_path}')"
+
+        # 6. Apply search filter if a search term is provided
+        if search:
+            search_conditions = f"""
+            WHERE
+                transaction_id ILIKE '%{search}%' OR
+                transaction_channel ILIKE '%{search}%' OR
+                model_product ILIKE '%{search}%' OR
+                price_product ILIKE '%{search}%' OR
+                no_hp_cust ILIKE '%{search}%' OR
+                name_cust ILIKE '%{search}%' OR
+                city_cust ILIKE '%{search}%' OR
+                prov_cust ILIKE '%{search}%' OR
+                address_cust ILIKE '%{search}%' OR
+                instagram_cust ILIKE '%{search}%' OR
+                created_by ILIKE '%{search}%' OR
+                updated_by ILIKE '%{search}%'
             """
+            query += search_conditions
 
-            # 6. Apply search filter if search term is provided
-            if search:
-                search_conditions = f"""
-                WHERE
-                    transaction_id ILIKE '%{search}%' OR
-                    transaction_channel ILIKE '%{search}%' OR
-                    model_product ILIKE '%{search}%' OR
-                    price_product ILIKE '%{search}%' OR
-                    no_hp_cust ILIKE '%{search}%' OR
-                    name_cust ILIKE '%{search}%' OR
-                    city_cust ILIKE '%{search}%' OR
-                    prov_cust ILIKE '%{search}%' OR
-                    address_cust ILIKE '%{search}%' OR
-                    instagram_cust ILIKE '%{search}%' OR
-                    created_by ILIKE '%{search}%' OR
-                    updated_by ILIKE '%{search}%'
-                """
-                query += search_conditions
+        # 7. Add sorting and pagination
+        query += f" ORDER BY updated_dt DESC LIMIT {limit} OFFSET {offset}"
 
-            # 7. Sorting and pagination
-            query += f"""
-            ORDER BY updated_dt DESC
-            LIMIT {limit} OFFSET {offset}
-            """
+        # Execute the query
+        df = duckdb_conn.execute(query).fetchdf()
+        print("Data loaded and filtered from S3 parquet file.")
 
-            # Execute the query
-            df = duckdb_conn.execute(query).fetchdf()
-            print("Data loaded and filtered from S3 parquet file.")
+        # 8. Get the total count of the filtered transactions
+        count_query = f"SELECT COUNT(*) FROM read_parquet('{s3_path}')"
+        if search:
+            count_query += search_conditions
 
-            # 7. Query for the total count of the filtered transactions
-            # If you need the total count for pagination purposes
-            count_query = f"""
-            SELECT COUNT(*) FROM read_parquet('{s3_path}')
-            """
-            if search:
-                count_query += search_conditions
+        total_all_data = duckdb_conn.execute(count_query).fetchone()[0]
 
-            total_all_data = duckdb_conn.execute(count_query).fetchone()[0]
-            
-        except Exception as e:
-            print(f"Failed to read and filter parquet file from S3: {str(e)}")
-            raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to read parquet file from S3")
-
-        
         total_data = len(df)
 
         # Convert DataFrame to a list of dictionaries to return as JSON
         transactions = df.to_dict(orient='records')
-        
+
         # 9. Return the transactions, the total count, the total count of all data, and the offset
         return {
             "total_data": total_data,
@@ -267,6 +406,7 @@ def read_transaction_by_id(
         # 2. Form the S3 path
         user_group = current_user.group
         bucket_name = generate_bucket_name(user_group) 
+        parquet_file_name = get_latest_transaction_file_from_s3(bucket_name)
         s3_path = f"s3://{bucket_name}/{parquet_file_name}"
 
         # 3. Load the Parquet file from S3 and filter by transaction_id using a SQL WHERE clause
@@ -306,24 +446,51 @@ def update_transaction(
     current_user: User = Depends(get_current_user)  # JWT authentication
 ):
     try:
-        # 1. Get the DuckDB connection using the helper function
-        ()
-
-        # 2. Form the S3 path
+        print("Starting transaction update process...")
         user_group = current_user.group
-        bucket_name = generate_bucket_name(user_group) 
+
+        # 1. AWS S3 credentials and path configuration
+        bucket_name = generate_bucket_name(user_group)
+
+        # Get the latest Parquet file and new Parquet file names
+        latest_parquet_file_name = get_latest_transaction_file_from_s3(bucket_name)
+        s3_path_latest = f"s3://{bucket_name}/{latest_parquet_file_name}"
+
+        parquet_file_name = generate_parquet_file_name()
         s3_path = f"s3://{bucket_name}/{parquet_file_name}"
 
-        # 3. Load the Parquet file from S3 into a DataFrame
+        # 2. Create S3 client and ensure the bucket exists
+        s3_client = boto3.client('s3', aws_access_key_id=aws_access_key, aws_secret_access_key=aws_secret_key, region_name=aws_region)
+        
         try:
-            df = duckdb_conn.execute(f"SELECT * FROM read_parquet('{s3_path}')").fetchdf()
+            s3_client.head_bucket(Bucket=bucket_name)
+            print(f"Bucket {bucket_name} exists.")
+        except ClientError:
+            print(f"Bucket {bucket_name} does not exist. Creating bucket.")
+            try:
+                s3_client.create_bucket(
+                    Bucket=bucket_name,
+                    CreateBucketConfiguration={'LocationConstraint': aws_region}
+                )
+                print(f"Bucket {bucket_name} created successfully.")
+            except ClientError as e:
+                raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to create S3 bucket")
+
+        # 3. Load the Parquet file from S3 into a DataFrame using PyArrow and s3fs
+        fs = s3fs.S3FileSystem(key=aws_access_key, secret=aws_secret_key)
+        try:
+            df = pd.read_parquet(s3_path_latest, filesystem=fs)
             print("Data loaded from S3 parquet file.")
-        except Exception as e:
-            print(f"Failed to read parquet file from S3: {str(e)}")
-            raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to read parquet file from S3")
+        except Exception:
+            raise HTTPException(status_code=404, detail="Parquet file not found or unreadable.")
 
         # 4. Fetch the existing transaction record
         transaction_df = df[df['transaction_id'] == transaction_id]
+        print("Type of 'created_dt' in the first row:", type(transaction_df.iloc[0]['created_dt']))
+        print("Transaction 'created_dt' type:", type(transaction.created_dt))
+
+        transaction.created_dt = transaction.created_dt.strftime('%Y-%m-%d %H:%M:%S')
+        transaction.updated_dt = transaction.updated_dt.strftime('%Y-%m-%d %H:%M:%S')
 
         if transaction_df.empty:
             raise HTTPException(status_code=404, detail="Transaction not found")
@@ -344,20 +511,17 @@ def update_transaction(
         for key, value in transaction.dict(exclude_unset=True).items():
             transaction_df.at[transaction_df.index[0], key] = value
 
+        
         # 10. Update the transaction_id
         transaction_df.at[transaction_df.index[0], 'transaction_id'] = new_transaction_id
 
-        # 11. Replace the updated transaction back into the original DataFrame
+        # 11. Combine the updated transaction with the rest of the DataFrame
         df.update(transaction_df)
 
-        # 12. Write the updated DataFrame back to the Parquet file in S3 using DuckDB
+        # 12. Write the updated DataFrame back to S3 in a new Parquet file using PyArrow and s3fs
         try:
-            # Register the updated DataFrame to DuckDB
-            duckdb_conn.register("updated_transactions", df)
-            
-            # Write the updated DataFrame to the S3 Parquet file
-            duckdb_conn.execute(f"COPY updated_transactions TO '{s3_path}' (FORMAT 'parquet');")
-            print(f"Parquet file updated and saved to S3: {s3_path}")
+            df.to_parquet(s3_path, engine='pyarrow', index=False, filesystem=fs)
+            print(f"New Parquet file created and saved to S3 at {s3_path}")
         except Exception as e:
             print(f"Failed to write updated parquet file to S3: {str(e)}")
             raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to update parquet file in S3")
@@ -369,6 +533,7 @@ def update_transaction(
     except Exception as e:
         print(f"Internal Server Error: {str(e)}")
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Internal Server Error")
+
 
 @router.delete("/{transaction_id}",   status_code=status.HTTP_200_OK)
 def delete_transaction(
@@ -382,6 +547,7 @@ def delete_transaction(
         # 2. Form the S3 path
         user_group = current_user.group
         bucket_name = generate_bucket_name(user_group) 
+        parquet_file_name = generate_parquet_file_name()
         s3_path = f"s3://{bucket_name}/{parquet_file_name}"
 
         # 3. Load the Parquet file from S3 into a DataFrame
