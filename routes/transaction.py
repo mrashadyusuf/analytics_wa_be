@@ -25,6 +25,9 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import s3fs
 
+import pika
+import json
+
 # Retrieve AWS credentials from environment variables
 aws_access_key = os.getenv("ACCESS_KEY")
 aws_secret_key = os.getenv("SECRET_KEY")
@@ -75,8 +78,6 @@ def get_latest_transaction_file_from_s3(bucket_name: str):
     response = s3_client.list_objects_v2(Bucket=bucket_name, Prefix=prefix_parquet_file_name)
     files = response.get('Contents', [])
 
-    print("S3 response:")
-
     # 3. Find the file with the most recent LastModified timestamp
     if not files:
         print("No files found")
@@ -96,38 +97,17 @@ def create_transaction(
     current_user: User = Depends(get_current_user)  # JWT authentication
 ):
     try:
-        print("Starting transaction creation process...")
+        print("Starting transaction queuing process...")
         user_group = current_user.group
 
         # 1. AWS S3 credentials and path configuration
         bucket_name = generate_bucket_name(user_group)
 
-        # variable to get latest parquet file
+        # variable to get the latest parquet file
         latest_parquet_file_name = get_latest_transaction_file_from_s3(bucket_name)
-        s3_path_latest= f"s3://{bucket_name}/{latest_parquet_file_name}"
+        s3_path_latest = f"s3://{bucket_name}/{latest_parquet_file_name}"
 
-        # variable to create new  parquet file
-        parquet_file_name =  generate_parquet_file_name()
-        s3_path = f"s3://{bucket_name}/{parquet_file_name}"
-
-        # 2. Create S3 client and ensure the bucket exists
-        s3_client = boto3.client('s3', aws_access_key_id=aws_access_key, aws_secret_access_key=aws_secret_key, region_name=aws_region)
-
-        try:
-            s3_client.head_bucket(Bucket=bucket_name)
-            print(f"Bucket {bucket_name} exists.")
-        except ClientError:
-            print(f"Bucket {bucket_name} does not exist. Creating bucket.")
-            try:
-                s3_client.create_bucket(
-                    Bucket=bucket_name,
-                    CreateBucketConfiguration={'LocationConstraint': aws_region}
-                )
-                print(f"Bucket {bucket_name} created successfully.")
-            except ClientError as e:
-                raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to create S3 bucket")
-
-        # 3. Try to read the existing Parquet file from S3
+        # 2. Try to read the existing Parquet file from S3
         fs = s3fs.S3FileSystem(key=aws_access_key, secret=aws_secret_key)
         try:
             existing_data_df = pd.read_parquet(s3_path_latest, filesystem=fs)
@@ -136,31 +116,28 @@ def create_transaction(
             print("Parquet file not found or unreadable. Creating a new one.")
             existing_data_df = pd.DataFrame()
 
-        # 4. Generate a new transaction ID
+        # 3. Generate new_num_id based on the last transaction in the existing Parquet file
         if not existing_data_df.empty:
             last_transaction = existing_data_df.iloc[-1]
-            last_num_id = int(last_transaction['transaction_id'][2:6])
-            new_num_id = str(last_num_id + 1).zfill(4)
+            last_num_id = int(last_transaction['transaction_id'][2:6])  # Extract the numeric part from 'TTxxxx'
+            new_num_id = str(last_num_id + 1).zfill(4)  # Increment and zero-fill to 4 digits
         else:
-            new_num_id = '0001'
+            new_num_id = '0001'  # Start with '0001' if no transactions exist
 
-        print("transaction_dt.st", transaction.transaction_dt, " type", type(transaction.transaction_dt))
+        print(f"Generated new_num_id: {new_num_id}")
+
+        # 4. Generate Transaction ID
         transaction_date_str = transaction.transaction_dt.strftime('%d%m%y')
         channel_code = transaction.transaction_channel[:2].upper()
         transaction_id = f'TT{new_num_id}{transaction_date_str}{channel_code}'
         
         print(f"Generated transaction ID: {transaction_id}")
 
-        # print("Type of 'transaction_dt' in the first row:", type(existing_data_df.iloc[0]['transaction_dt']))
-        print("Type of 'transaction_dt' new ", type(transaction.transaction_dt))
-        transaction_dt_converted = pd.to_datetime(transaction.transaction_dt)
-
-
-        # 5. Create a DataFrame for the new transaction
-        new_transaction_df = pd.DataFrame([{
+        # Prepare transaction data to be queued
+        transaction_data = {
             'transaction_id': transaction_id,
             'transaction_channel': transaction.transaction_channel,
-            'transaction_dt': transaction_dt_converted,
+            'transaction_dt': transaction.transaction_dt.strftime('%Y-%m-%d %H:%M:%S'),
             'model_product': transaction.model_product,
             'kuantitas': transaction.kuantitas,
             'price_product': transaction.price_product,
@@ -171,27 +148,34 @@ def create_transaction(
             'address_cust': transaction.address_cust,
             'instagram_cust': transaction.instagram_cust,
             'created_by': current_user.username,
-            'created_dt': transaction.created_dt.strftime('%Y-%m-%d %H:%M:%S'),  # Convert to custom string format
+            'created_dt': transaction.created_dt.strftime('%Y-%m-%d %H:%M:%S'),
             'updated_by': current_user.username,
-            'updated_dt': transaction.updated_dt.strftime('%Y-%m-%d %H:%M:%S'),  # Convert to custom string format,
-        }])
+            'updated_dt': transaction.updated_dt.strftime('%Y-%m-%d %H:%M:%S')
+        }
+        transaction_data['user_group'] = user_group
+        # 5. Connect to RabbitMQ and publish transaction data
+        connection = pika.BlockingConnection(pika.ConnectionParameters('localhost'))  # Adjust RabbitMQ server address if necessary
+        channel = connection.channel()
 
-        print("Transaction Date (transaction_dt):", type(new_transaction_df['transaction_dt'].iloc[0]))
+        # Declare a queue (if not already exists)
+        channel.queue_declare(queue='transaction_queue', durable=True)
 
-        # 6. Combine the new transaction data with the existing data
-        if not existing_data_df.empty:
-            updated_df = pd.concat([existing_data_df, new_transaction_df], ignore_index=True)
-        else:
-            updated_df = new_transaction_df
+        # Publish the message
+        channel.basic_publish(
+            exchange='',
+            routing_key='transaction_queue',
+            body=json.dumps(transaction_data),
+            properties=pika.BasicProperties(
+                delivery_mode=2,  # Make the message persistent
+            )
+        )
 
-        print("New transaction appended to existing data.")
+        print(f"Transaction queued successfully with ID: {transaction_id}")
 
-        # 7. Write the updated DataFrame back to S3 in Parquet format using PyArrow
-        updated_df.to_parquet(s3_path, engine='pyarrow', index=False, filesystem=fs)
-        print(f"Parquet file updated and saved to S3 at {s3_path}")
+        # Close the connection
+        connection.close()
 
-        print("Transaction process completed successfully.")
-        return {"status": "Transaction successfully added to S3"}
+        return {"status": f"Transaction {transaction_id} queued successfully."}
 
     except Exception as e:
         print(f"Internal Server Error: {str(e)}")
@@ -207,76 +191,21 @@ def create_transactions_in_batch(
         print("Starting batch transaction creation process...")
         user_group = current_user.group
 
-        # 1. AWS S3 credentials and path configuration
-        bucket_name = generate_bucket_name(user_group)
+        # Set up RabbitMQ connection and channel
+        credentials = pika.PlainCredentials('guest', 'guest')  # Modify if you use different credentials
+        connection_params = pika.ConnectionParameters('localhost', 5672, '/', credentials)  # Modify 'localhost' if necessary
+        connection = pika.BlockingConnection(connection_params)
+        channel = connection.channel()
 
-        # Variable to get the latest parquet file
-        latest_parquet_file_name = get_latest_transaction_file_from_s3(bucket_name)
-        s3_path_latest = f"s3://{bucket_name}/{latest_parquet_file_name}"
+        # Declare the queue
+        channel.queue_declare(queue='transaction_queue', durable=True)
 
-        # Variable to create new parquet file
-        parquet_file_name = generate_parquet_file_name()
-        s3_path = f"s3://{bucket_name}/{parquet_file_name}"
-
-        # 2. Create S3 client and ensure the bucket exists
-        s3_client = boto3.client('s3', aws_access_key_id=aws_access_key, aws_secret_access_key=aws_secret_key, region_name=aws_region)
-
-        try:
-            s3_client.head_bucket(Bucket=bucket_name)
-            print(f"Bucket {bucket_name} exists.")
-        except ClientError:
-            print(f"Bucket {bucket_name} does not exist. Creating bucket.")
-            try:
-                s3_client.create_bucket(
-                    Bucket=bucket_name,
-                    CreateBucketConfiguration={'LocationConstraint': aws_region}
-                )
-                print(f"Bucket {bucket_name} created successfully.")
-            except ClientError as e:
-                raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to create S3 bucket")
-
-        # 3. Try to read the existing Parquet file from S3
-        fs = s3fs.S3FileSystem(key=aws_access_key, secret=aws_secret_key)
-        try:
-            existing_data_df = pd.read_parquet(s3_path_latest, filesystem=fs)
-            print("Existing data loaded from S3.")
-        except Exception:
-            print("Parquet file not found or unreadable. Creating a new one.")
-            existing_data_df = pd.DataFrame()
-
-        # 4. Initialize the sequence number
-        if not existing_data_df.empty:
-            # Get the last num_id from the last transaction in the existing data
-            last_transaction = existing_data_df.iloc[-1]
-            last_num_id = int(last_transaction['transaction_id'][2:6])
-        else:
-            last_num_id = 0  # Start with 0001 if there are no previous transactions
-
-        # 5. Process each transaction in the batch
-        new_transactions = []
+        # Process each transaction in the batch
         for transaction in transactions:
-            # Increment the num_id for each transaction in the batch
-            last_num_id += 1
-            new_num_id = str(last_num_id).zfill(4)
-
-            # Format the transaction date to 'ddmmyy'
-            transaction_date_str = transaction.transaction_dt.strftime('%d%m%y')
-
-            # Extract the first two characters from the transaction channel
-            channel_code = transaction.transaction_channel[:2].upper()
-
-            # Construct the new transaction_id
-            transaction_id = f'TT{new_num_id}{transaction_date_str}{channel_code}'
-
-            print(f"Generated transaction ID: {transaction_id}")
-
-            transaction_dt_converted = pd.to_datetime(transaction.transaction_dt)
-
-            # Create a DataFrame for the new transaction
-            new_transaction_df = pd.DataFrame([{
-                'transaction_id': transaction_id,
+            # Prepare transaction data to be sent to RabbitMQ
+            transaction_data = {
                 'transaction_channel': transaction.transaction_channel,
-                'transaction_dt': transaction_dt_converted,
+                'transaction_dt': transaction.transaction_dt.strftime('%Y-%m-%d %H:%M:%S'),
                 'model_product': transaction.model_product,
                 'kuantitas': transaction.kuantitas,
                 'price_product': transaction.price_product,
@@ -287,30 +216,28 @@ def create_transactions_in_batch(
                 'address_cust': transaction.address_cust,
                 'instagram_cust': transaction.instagram_cust,
                 'created_by': current_user.username,
-                'created_dt': transaction.created_dt.strftime('%Y-%m-%d %H:%M:%S'),  # Convert to custom string format
+                'created_dt': transaction.created_dt.strftime('%Y-%m-%d %H:%M:%S'),
                 'updated_by': current_user.username,
                 'updated_dt': transaction.updated_dt.strftime('%Y-%m-%d %H:%M:%S'),
-            }])
+                'user_group': user_group  # Add user_group to transaction
+            }
 
-            new_transactions.append(new_transaction_df)
+            # Publish the transaction to RabbitMQ
+            channel.basic_publish(
+                exchange='',
+                routing_key='transaction_batch_queue',
+                body=json.dumps(transaction_data),  # Serialize transaction_data as JSON
+                properties=pika.BasicProperties(
+                    delivery_mode=2,  # Make the message persistent
+                )
+            )
+            print(f"Published transaction for {transaction.name_cust} to RabbitMQ.")
 
-        # 6. Combine all the new transactions into a single DataFrame
-        new_transactions_df = pd.concat(new_transactions, ignore_index=True)
+        # Close the RabbitMQ connection
+        connection.close()
 
-        # 7. Combine the new transaction data with the existing data
-        if not existing_data_df.empty:
-            updated_df = pd.concat([existing_data_df, new_transactions_df], ignore_index=True)
-        else:
-            updated_df = new_transactions_df
-
-        print("New transactions appended to existing data.")
-
-        # 8. Write the updated DataFrame back to S3 in Parquet format using PyArrow
-        updated_df.to_parquet(s3_path, engine='pyarrow', index=False, filesystem=fs)
-        print(f"Parquet file updated and saved to S3 at {s3_path}")
-
-        print("Batch transaction process completed successfully.")
-        return {"status": "Batch transactions successfully added to S3"}
+        print("Batch transactions sent to RabbitMQ successfully.")
+        return {"status": "Batch transactions sent to RabbitMQ"}
 
     except Exception as e:
         print(f"Internal Server Error: {str(e)}")
@@ -439,96 +366,49 @@ def read_transaction_by_id(
         print(f"Internal Server Error: {str(e)}")
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Internal Server Error")
 
-@router.put("/{transaction_id}", response_model=TransactionInDB, status_code=status.HTTP_200_OK)
+
+@router.put("/{transaction_id}", status_code=status.HTTP_200_OK)
 def update_transaction(
     transaction_id: str,  # Existing transaction ID to be updated
     transaction: TransactionUpdate, 
     current_user: User = Depends(get_current_user)  # JWT authentication
 ):
     try:
-        print("Starting transaction update process...")
-        user_group = current_user.group
-
-        # 1. AWS S3 credentials and path configuration
-        bucket_name = generate_bucket_name(user_group)
-
-        # Get the latest Parquet file and new Parquet file names
-        latest_parquet_file_name = get_latest_transaction_file_from_s3(bucket_name)
-        s3_path_latest = f"s3://{bucket_name}/{latest_parquet_file_name}"
-
-        parquet_file_name = generate_parquet_file_name()
-        s3_path = f"s3://{bucket_name}/{parquet_file_name}"
-
-        # 2. Create S3 client and ensure the bucket exists
-        s3_client = boto3.client('s3', aws_access_key_id=aws_access_key, aws_secret_access_key=aws_secret_key, region_name=aws_region)
-        
-        try:
-            s3_client.head_bucket(Bucket=bucket_name)
-            print(f"Bucket {bucket_name} exists.")
-        except ClientError:
-            print(f"Bucket {bucket_name} does not exist. Creating bucket.")
-            try:
-                s3_client.create_bucket(
-                    Bucket=bucket_name,
-                    CreateBucketConfiguration={'LocationConstraint': aws_region}
-                )
-                print(f"Bucket {bucket_name} created successfully.")
-            except ClientError as e:
-                raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to create S3 bucket")
-
-        # 3. Load the Parquet file from S3 into a DataFrame using PyArrow and s3fs
-        fs = s3fs.S3FileSystem(key=aws_access_key, secret=aws_secret_key)
-        try:
-            df = pd.read_parquet(s3_path_latest, filesystem=fs)
-            print("Data loaded from S3 parquet file.")
-        except Exception:
-            raise HTTPException(status_code=404, detail="Parquet file not found or unreadable.")
-
-        # 4. Fetch the existing transaction record
-        transaction_df = df[df['transaction_id'] == transaction_id]
-        print("Type of 'created_dt' in the first row:", type(transaction_df.iloc[0]['created_dt']))
-        print("Transaction 'created_dt' type:", type(transaction.created_dt))
-
+        print("Publishing transaction update request to RabbitMQ...")
+        print("transaction update",transaction)
+        transaction.transaction_dt = transaction.transaction_dt.strftime('%Y-%m-%d')
         transaction.created_dt = transaction.created_dt.strftime('%Y-%m-%d %H:%M:%S')
         transaction.updated_dt = transaction.updated_dt.strftime('%Y-%m-%d %H:%M:%S')
+        # Prepare the data to be sent to RabbitMQ
+        update_data = {
+            'transaction_id': transaction_id,
+            'transaction_data': transaction.dict(exclude_unset=True),
+            'user_group': current_user.group,
+            'username': current_user.username
+        }
 
-        if transaction_df.empty:
-            raise HTTPException(status_code=404, detail="Transaction not found")
+        # Setup RabbitMQ connection and publish the update message
+        credentials = pika.PlainCredentials('guest', 'guest')
+        connection = pika.BlockingConnection(pika.ConnectionParameters('localhost', 5672, '/', credentials))
+        channel = connection.channel()
 
-        # 5. Extract the original num_id from the existing transaction_id
-        original_num_id = transaction_id[2:6]  # Extract characters 3 to 6
+        # Declare the update queue if it doesn't already exist
+        channel.queue_declare(queue='transaction_update_queue', durable=True)
 
-        # 6. Format the transaction date to 'ddmmyy'
-        transaction_date_str = transaction.transaction_dt.strftime('%d%m%y')  # e.g., '210824'
-        
-        # 7. Extract the first two characters from the transaction channel
-        channel_code = transaction.transaction_channel[:2].upper()  # e.g., 'ON'
-        
-        # 8. Construct the new transaction_id using the original num_id
-        new_transaction_id = f'TT{original_num_id}{transaction_date_str}{channel_code}'
+        # Publish the update message to RabbitMQ
+        channel.basic_publish(
+            exchange='',
+            routing_key='transaction_update_queue',
+            body=json.dumps(update_data),  # Serialize the update_data to JSON
+            properties=pika.BasicProperties(
+                delivery_mode=2,  # Make message persistent
+            )
+        )
 
-        # 9. Update the transaction fields
-        for key, value in transaction.dict(exclude_unset=True).items():
-            transaction_df.at[transaction_df.index[0], key] = value
+        print(f"Update request for transaction ID {transaction_id} sent to RabbitMQ.")
+        connection.close()
 
-        
-        # 10. Update the transaction_id
-        transaction_df.at[transaction_df.index[0], 'transaction_id'] = new_transaction_id
-
-        # 11. Combine the updated transaction with the rest of the DataFrame
-        df.update(transaction_df)
-
-        # 12. Write the updated DataFrame back to S3 in a new Parquet file using PyArrow and s3fs
-        try:
-            df.to_parquet(s3_path, engine='pyarrow', index=False, filesystem=fs)
-            print(f"New Parquet file created and saved to S3 at {s3_path}")
-        except Exception as e:
-            print(f"Failed to write updated parquet file to S3: {str(e)}")
-            raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to update parquet file in S3")
-
-        # 13. Return the updated transaction
-        updated_transaction = transaction_df.iloc[0].to_dict()
-        return updated_transaction
+        return {"status": "Update request sent to RabbitMQ", "transaction_id": transaction_id}
 
     except Exception as e:
         print(f"Internal Server Error: {str(e)}")
@@ -537,51 +417,41 @@ def update_transaction(
 
 @router.delete("/{transaction_id}",   status_code=status.HTTP_200_OK)
 def delete_transaction(
-    transaction_id: str,  # Change type to str since transaction_id is not an integer
+    transaction_id: str,  # Existing transaction ID to delete
     current_user: User = Depends(get_current_user)  # JWT authentication
 ):
     try:
-        # 1. Get the DuckDB connection using the helper function
-        ()
+        print("Publishing delete transaction request to RabbitMQ...")
 
-        # 2. Form the S3 path
-        user_group = current_user.group
-        bucket_name = generate_bucket_name(user_group) 
-        parquet_file_name = generate_parquet_file_name()
-        s3_path = f"s3://{bucket_name}/{parquet_file_name}"
+        # Prepare the data to be sent to RabbitMQ
+        delete_data = {
+            'transaction_id': transaction_id,
+            'user_group': current_user.group,
+            'username': current_user.username
+        }
 
-        # 3. Load the Parquet file from S3 into a DataFrame
-        try:
-            df = duckdb_conn.execute(f"SELECT * FROM read_parquet('{s3_path}')").fetchdf()
-            print("Data loaded from S3 parquet file.")
-        except Exception as e:
-            print(f"Failed to read parquet file from S3: {str(e)}")
-            raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to read parquet file from S3")
+        # Setup RabbitMQ connection and publish the delete message
+        credentials = pika.PlainCredentials('guest', 'guest')
+        connection = pika.BlockingConnection(pika.ConnectionParameters('localhost', 5672, '/', credentials))
+        channel = connection.channel()
 
-        # 4. Find the transaction by transaction_id
-        transaction_df = df[df['transaction_id'] == transaction_id]
+        # Declare the delete queue if it doesn't already exist
+        channel.queue_declare(queue='transaction_delete_queue', durable=True)
 
-        # 5. If transaction not found, raise a 404 error
-        if transaction_df.empty:
-            raise HTTPException(status_code=404, detail="Transaction not found")
+        # Publish the delete message to RabbitMQ
+        channel.basic_publish(
+            exchange='',
+            routing_key='transaction_delete_queue',
+            body=json.dumps(delete_data),  # Serialize the delete_data to JSON
+            properties=pika.BasicProperties(
+                delivery_mode=2,  # Make message persistent
+            )
+        )
 
-        # 6. Remove the transaction from the DataFrame
-        df = df[df['transaction_id'] != transaction_id]
+        print(f"Delete request for transaction ID {transaction_id} sent to RabbitMQ.")
+        connection.close()
 
-        # 7. Write the updated DataFrame back to the Parquet file in S3 using DuckDB
-        try:
-            # Register the updated DataFrame to DuckDB
-            duckdb_conn.register("updated_transactions", df)
-            
-            # Write the updated DataFrame to the S3 Parquet file
-            duckdb_conn.execute(f"COPY updated_transactions TO '{s3_path}' (FORMAT 'parquet');")
-            print(f"Parquet file updated and saved to S3: {s3_path}")
-        except Exception as e:
-            print(f"Failed to write updated parquet file to S3: {str(e)}")
-            raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to update parquet file in S3")
-
-        # 8. Return success message
-        return {"message": "Delete Transaction Success"}
+        return {"status": "Delete request sent to RabbitMQ", "transaction_id": transaction_id}
 
     except Exception as e:
         print(f"Internal Server Error: {str(e)}")

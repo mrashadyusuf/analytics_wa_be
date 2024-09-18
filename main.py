@@ -8,13 +8,21 @@ from auth import get_current_user, User
 from routes.auth import router as auth_router
 from routes.transaction import router as transaction_router
 from routes.test import router as test_router
-
 from database import engine, database
+from consumer.transaction_consumer import start_consumer  
+import threading
+
+# Function to start the consumer in a separate thread
+def run_consumer_in_background():
+    consumer_thread = threading.Thread(target=start_consumer)
+    consumer_thread.daemon = True  # This makes sure the thread exits when the main program does
+    consumer_thread.start()
 
 app = FastAPI()
 @app.on_event("startup")
 async def startup():
     await database.connect()
+    run_consumer_in_background()
 
 @app.on_event("shutdown")
 async def shutdown():
