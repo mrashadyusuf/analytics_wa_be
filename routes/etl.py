@@ -7,7 +7,7 @@ import pandas as pd
 import datetime
 from utilities.instagram import schedule_get_follower
 
-from utilities.aws import getJsonFromAws, s3_path, get_duckdb_connection, getParquetFromAws
+from utilities.aws import getJsonFromAws, s3_path, get_duckdb_connection, getParquetFromAws, path_transaction, s3_path_transaction
 from auth import get_current_user, User
 import asyncio
 from apscheduler.schedulers.background import BackgroundScheduler
@@ -56,18 +56,18 @@ async def run_etl(response: Response
     mulai = datetime.datetime.now()
     
     await data_transaksi(scheduler, bucket)
-    await chat_wa(scheduler, bucket)
-    await sum_transaksi(bucket)
-    await sum_average_sales(bucket)
-    await sum_customer(bucket)
-    await sum_model(bucket)
-    await sum_region(bucket)
-    await sum_sales_trend(bucket)
-    await sum_sales_trend_pertanggal(bucket)
-    await sum_store(bucket)
-    await sum_top_produk(bucket)
-    await sum_wa(bucket)
-    await sum_customer_follower(bucket)
+    # await chat_wa(scheduler, bucket)
+    # await sum_transaksi(bucket)
+    # await sum_average_sales(bucket)
+    # await sum_customer(bucket)
+    # await sum_model(bucket)
+    # await sum_region(bucket)
+    # await sum_sales_trend(bucket)
+    # await sum_sales_trend_pertanggal(bucket)
+    # await sum_store(bucket)
+    # await sum_top_produk(bucket)
+    # await sum_wa(bucket)
+    # await sum_customer_follower(bucket)
     
     selesai = datetime.datetime.now()
     durasi = selesai - mulai
@@ -99,21 +99,26 @@ async def stop_schedule():
 
 
 async def data_transaksi(scheduler, bucket):    
-    path = s3_path(bucket, transaction = "transaksi")
-    tb_path = f"{path}transaction.parquet"
+    path = path_transaction(scheduler, bucket)
     duckdb_conn = get_duckdb_connection()
-    query = f"""
-        SELECT transaction_id, transaction_dt, STRFTIME(transaction_dt, '%d') AS tanggal, 
-        STRFTIME(transaction_dt, '%b') bulan, STRFTIME(transaction_dt,'%Y') tahun, name_cust, 
-        model_product, address_cust, no_hp_cust, prov_cust, city_cust,
-        LOWER(SPLIT_PART(REGEXP_REPLACE(instagram_cust, '^[: @]+', ''), ' ', 1)) AS instagram, transaction_channel, 
-        price_product, kuantitas
-        FROM read_parquet('{tb_path}')
-    """
-    if scheduler :
-        query = query + \
-           f""" WHERE created_dt::date = CURRENT_DATE
+    if len(path) > 0:
+        query = [f"""
+            SELECT transaction_id, transaction_dt, STRFTIME(CAST(transaction_dt AS TIMESTAMP), '%d') AS tanggal, 
+            STRFTIME(CAST(transaction_dt AS TIMESTAMP), '%b') bulan, STRFTIME(CAST(transaction_dt AS TIMESTAMP),'%Y') tahun, name_cust, 
+            model_product, address_cust, no_hp_cust, prov_cust, city_cust,
+            LOWER(SPLIT_PART(REGEXP_REPLACE(instagram_cust, '^[: @]+', ''), ' ', 1)) AS instagram, transaction_channel, 
+            price_product, kuantitas
+            FROM read_parquet('{tb_path}')
         """
+        
+        for tb_path in path
+        ]
+
+        final_query = " UNION ".join(query)
+        
+        dataTransaksi = duckdb_conn.execute(final_query).fetchall()
+        
+
 
     # q = """SELECT id, tgl_transaksi, tanggal, bulan, tahun, nama, model, alamat, no_telp, provinsi, kota_kab, 
     #     LOWER(SPLIT_PART(REGEXP_REPLACE(instagram, '^[: @]+', ''), ' ', 1)) AS instagram, store, harga, kuantitas
@@ -121,29 +126,29 @@ async def data_transaksi(scheduler, bucket):
     # q = text(q)
     # dataPostgre = conn.execute(q).fetchall()
 
-    dataTransaksi = duckdb_conn.execute(query).fetchall()
+    # dataTransaksi = duckdb_conn.execute(query).fetchall()
     
     # dataTransaksi = dataPostgre + data
 
-    df = pd.DataFrame(dataTransaksi, columns=[
-        'id', 'tgl_transaksi', 'tanggal', 
-        'bulan', 'tahun', 'nama', 'model', 
-        'alamat', 'no_telp', 'provinsi', 'kota_kab',
-        'instagram', 'store', 'harga', 'kuantitas'
-    ])
-    
-    path = s3_path(bucket, None)
-    pq = f"""SELECT * FROM read_parquet('{path}tb_transaksi.parquet')"""
-    exist_pq = duckdb_conn.execute(pq).fetchdf()
-    df_new = duckdb_conn.execute(f"""
-        SELECT * FROM df
-        WHERE id NOT IN (SELECT id FROM exist_pq)
-    """).fetchdf()
-    if len(df_new) > 0:
-        df_combined = pd.concat([exist_pq, df_new], ignore_index=True)
-        duckdb_conn.register('transaction_view', df_combined)
+        df = pd.DataFrame(dataTransaksi, columns=[
+            'id', 'tgl_transaksi', 'tanggal', 
+            'bulan', 'tahun', 'nama', 'model', 
+            'alamat', 'no_telp', 'provinsi', 'kota_kab',
+            'instagram', 'store', 'harga', 'kuantitas'
+        ])
+        
+        path = s3_path_transaction(bucket)
+        pq = f"""SELECT * FROM read_parquet('{path}tb_transaksi.parquet')"""
+        exist_pq = duckdb_conn.execute(pq).fetchdf()
+        df_new = duckdb_conn.execute(f"""
+            SELECT * FROM df
+            WHERE id NOT IN (SELECT id FROM exist_pq)
+        """).fetchdf()
+        if len(df_new) > 0:
+            df_combined = pd.concat([exist_pq, df_new], ignore_index=True)
+            duckdb_conn.register('transaction_view', df_combined)
 
-        duckdb_conn.execute(f"COPY transaction_view TO '{path}tb_transaksi.parquet' (FORMAT PARQUET)")
+            duckdb_conn.execute(f"COPY transaction_view TO '{path}tb_transaksi.parquet' (FORMAT PARQUET)")
 
     # duckdb_conn.execute("""
     #                 CREATE TABLE IF NOT EXISTS tb_transaksi (
@@ -174,7 +179,7 @@ async def data_transaksi(scheduler, bucket):
     
 
 async def sum_transaksi(bucket):
-    path = s3_path(bucket, None)
+    path = s3_path(bucket)
     tb_path = f"{path}tb_transaksi.parquet"
     duckdb_conn = get_duckdb_connection()
     pq = f"""
@@ -236,7 +241,7 @@ async def sum_transaksi(bucket):
 
 async def chat_wa(scheduler, bucket):
     duckdb_conn = get_duckdb_connection()
-    path = s3_path(bucket, None)
+    path = s3_path(bucket)
     
     # Membuat tabel jika belum ada
     # duckdb_conn.execute("""
@@ -275,7 +280,7 @@ async def chat_wa(scheduler, bucket):
 
 
 async def sum_wa(bucket):
-    path = s3_path(bucket, None)
+    path = s3_path(bucket)
     tb_path = f"{path}tb_chat_wa.parquet"
     duckdb_conn = get_duckdb_connection()
     query = f"""
@@ -337,7 +342,7 @@ async def sum_wa(bucket):
     duckdb_conn.close()
     
 async def sum_average_sales(bucket):
-    path = s3_path(bucket, None)
+    path = s3_path(bucket)
     tb_path = f"{path}tb_transaksi.parquet"
     duckdb_conn = get_duckdb_connection()
     query = f"""
@@ -404,7 +409,7 @@ async def sum_average_sales(bucket):
     duckdb_conn.close()
 
 async def sum_customer(bucket):
-    path = s3_path(bucket, None)
+    path = s3_path(bucket)
     tb_path = f"{path}tb_transaksi.parquet"
     duckdb_conn = get_duckdb_connection()
     query = f"""
@@ -455,7 +460,7 @@ async def sum_customer(bucket):
     duckdb_conn.close()
 
 async def sum_customer_follower(bucket):
-    path = s3_path(bucket, None)
+    path = s3_path(bucket)
     tb_path = f"{path}tb_transaksi.parquet"
     duckdb_conn = get_duckdb_connection()
     query = f"""
@@ -508,7 +513,7 @@ async def sum_customer_follower(bucket):
     duckdb_conn.close()
 
 async def sum_model(bucket):
-    path = s3_path(bucket, None)
+    path = s3_path(bucket)
     tb_path = f"{path}tb_transaksi.parquet"
     duckdb_conn = get_duckdb_connection()
     query = f"""
@@ -561,7 +566,7 @@ async def sum_model(bucket):
     duckdb_conn.close()
 
 async def sum_region(bucket):
-    path = s3_path(bucket, None)
+    path = s3_path(bucket)
     tb_path = f"{path}tb_transaksi.parquet"
     duckdb_conn = get_duckdb_connection()
     query = f"""
@@ -611,7 +616,7 @@ async def sum_region(bucket):
     duckdb_conn.close()
 
 async def sum_sales_trend(bucket):
-    path = s3_path(bucket, None)
+    path = s3_path(bucket)
     tb_path = f"{path}tb_transaksi.parquet"
     duckdb_conn = get_duckdb_connection()
     query = f"""
@@ -664,7 +669,7 @@ async def sum_sales_trend(bucket):
     duckdb_conn.close()
 
 async def sum_sales_trend_pertanggal(bucket):
-    path = s3_path(bucket, None)
+    path = s3_path(bucket)
     tb_path = f"{path}tb_transaksi.parquet"
     duckdb_conn = get_duckdb_connection()
     query = f"""
@@ -711,7 +716,7 @@ async def sum_sales_trend_pertanggal(bucket):
     duckdb_conn.close()
 
 async def sum_store(bucket):
-    path = s3_path(bucket, None)
+    path = s3_path(bucket)
     tb_path = f"{path}tb_transaksi.parquet"
     duckdb_conn = get_duckdb_connection()
     query = f"""
@@ -768,7 +773,7 @@ async def sum_store(bucket):
     duckdb_conn.close()
 
 async def sum_top_produk(bucket):
-    path = s3_path(bucket, None)
+    path = s3_path(bucket)
     tb_path = f"{path}tb_transaksi.parquet"
     duckdb_conn = get_duckdb_connection()
     query = f"""

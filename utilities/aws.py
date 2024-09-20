@@ -16,13 +16,7 @@ aws_secret_key = os.getenv("SECRET_KEY")
 aws_region = os.getenv("REGION")
 
 
-def generate_bucket_name():
-
-    user_group = "teman-thrifty"
-    return f'customer-{user_group.lower()}'
-
-
-def getJsonFromAws(scheduler):
+def s3_session():
     session = boto3.Session(
         aws_access_key_id=aws_access_key,
         aws_secret_access_key=aws_secret_key,
@@ -30,6 +24,11 @@ def getJsonFromAws(scheduler):
     )
 
     s3 = session.client('s3')
+    return s3
+
+
+def getJsonFromAws(scheduler):    
+    s3 = s3_session()
 
     # Nama bucket
     bucket_name = 'wa-scraper-tle'
@@ -124,7 +123,6 @@ def get_duckdb_connection():
         raise ValueError("AWS credentials are not set in the environment variables.")
 
     # Create a DuckDB connection
-    # bucket_name = generate_bucket_name()
     duckdb_conn = duckdb.connect()
     print("DuckDB connection established.")
 
@@ -141,12 +139,55 @@ def get_duckdb_connection():
     
     return duckdb_conn
 
-def s3_path(bucket, transaction):
-    parquet_prefix = "ETL/"
-    if transaction:
-        parquet_prefix = "TRANSACTION/"
+def path_transaction(scheduler, bucket):
+    bucket_name = f'customer-{bucket.lower()}'
+    folder_name = "TRANSACTION/"
+    s3 = s3_session()
+    response = s3.list_objects_v2(Bucket=bucket_name, Prefix=folder_name)
 
-    # bucket_name = generate_bucket_name() 
+    tr = []
+    today = datetime.now().strftime('%Y-%m-%d')
+    for obj in response.get('Contents', []):
+        lastmodified = obj['LastModified'].strftime('%Y-%m-%d')
+        if (obj['Key'] != 'TRANSACTION/tb_transaksi.parquet') & obj['Key'].endswith('.parquet') :
+            # jika scheduler ambil file parquet yang modified date nya = current date saja
+            if scheduler & (lastmodified == today):
+                path = f"s3://{bucket_name}/{obj['Key']}"
+                tr.append(path)
+            else:
+                path = f"s3://{bucket_name}/{obj['Key']}"
+                # print(path)
+                tr.append(path)
+    return tr
+
+def s3_path_transaction(bucket):
+    parquet_prefix = "TRANSACTION/"
+
+    bucket_name = f'customer-{bucket.lower()}'
+    path = f"s3://{bucket_name}/{parquet_prefix}"
+
+    s3_client = boto3.client('s3', aws_access_key_id=aws_access_key, aws_secret_access_key=aws_secret_key, region_name=aws_region)
+    try:
+        s3_client.head_bucket(Bucket=bucket_name)
+        print(f"Bucket {bucket_name} exists.")
+    except ClientError:
+        # If the bucket does not exist, create it
+        print(f"Bucket {bucket_name} does not exist. Creating bucket.")
+        try:
+            s3_client.create_bucket(
+                Bucket=bucket_name,
+                CreateBucketConfiguration={'LocationConstraint': aws_region}
+            )
+            print(f"Bucket {bucket_name} created successfully.")
+        except ClientError as e:
+            print(f"Failed to create bucket: {str(e)}")
+            raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to create S3 bucket")
+
+    return path
+
+def s3_path(bucket):
+    parquet_prefix = "ETL/"
+
     bucket_name = f'customer-{bucket.lower()}'
     path = f"s3://{bucket_name}/{parquet_prefix}"
 
