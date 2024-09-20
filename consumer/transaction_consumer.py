@@ -23,7 +23,6 @@ def process_transaction(ch, method, properties, body):
 
         # Query all existing transactions from the database
         existing_data = db.query(Transaction).all()  # Retrieve all existing transactions
-        print("22")
         # Convert existing transactions to a DataFrame
         existing_data_df = pd.DataFrame([{
             'transaction_id': trans.transaction_id,
@@ -43,7 +42,6 @@ def process_transaction(ch, method, properties, body):
             'updated_by': trans.updated_by,
             'updated_dt': trans.updated_dt.strftime('%Y-%m-%d %H:%M:%S')
         } for trans in existing_data])
-        print("33")
 
         # AWS S3 credentials and path configuration (for storing Parquet)
         bucket_name = generate_bucket_name(transaction_data['user_group'])  # Can still use the user_group from the message

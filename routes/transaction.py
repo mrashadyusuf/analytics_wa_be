@@ -187,7 +187,6 @@ def create_transactions_in_batch(
         connection_params = pika.ConnectionParameters('localhost', 5672, '/', credentials)  # Modify 'localhost' if necessary
         connection = pika.BlockingConnection(connection_params)
         channel = connection.channel()
-        print("11")
 
         # Declare the queue
         channel.queue_declare(queue='transaction_queue', durable=True)
@@ -197,19 +196,16 @@ def create_transactions_in_batch(
 
         # Process each transaction in the batch
         for transaction in transactions:
-            print("loop")
             # Retrieve the last created transaction in PostgreSQL
             last_transaction = db.query(Transaction).order_by(
                 desc(Transaction.created_dt),
                 desc(Transaction.transaction_id)
             ).first()
-            print("22")
             if last_transaction:
                 last_num_id = int(last_transaction.transaction_id[2:6])  # Extract numeric part, e.g., '0005' -> 5
                 new_num_id = str(last_num_id + 1).zfill(4)  # Increment by 1 and zero-fill, e.g., '0006'
             else:
                 new_num_id = '0001'  # If no previous transactions, start with '0001'
-            print("33")
             # Format the transaction date and extract channel code
             transaction_date_str = transaction.transaction_dt.strftime('%d%m%y')  # Format 'ddmmyy'
             channel_code = transaction.transaction_channel[:2].upper()  # Get first two characters of the channel
@@ -219,7 +215,6 @@ def create_transactions_in_batch(
 
             # Check if transaction ID already exists
             existing_transaction = db.query(Transaction).filter(Transaction.transaction_id == transaction_id).first()
-            print("existing_transaction",existing_transaction)
             if existing_transaction:
                 raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Transaction ID already exists")
 
@@ -258,12 +253,9 @@ def create_transactions_in_batch(
                 'user_group': user_group  # Add user_group to the transaction data
             }
 
-            print("transaction",transaction)
 
             # Append each transaction data to the batch list
             transaction_batch_data.append(transaction_data_for_queue)
-            print("finish loop  ")
-        print("transaction_batch_data",transaction_batch_data[0])
         # Publish the entire batch of transactions as an array to RabbitMQ
         channel.basic_publish(
             exchange='',
@@ -360,14 +352,11 @@ def update_transaction(
 
         # 1. Fetch the existing transaction record from PostgreSQL
         db_transaction = db.query(Transaction).filter(Transaction.transaction_id == transaction_id).first()
-        print("db_transaction",db_transaction)
         if not db_transaction:
             raise HTTPException(status_code=404, detail="Transaction not found")
-        print("11")
 
         # 2. Extract the original num_id from the existing transaction_id
         original_num_id = transaction_id[2:6]  # Extract characters 3 to 6
-        print("22")
 
         # 3. Format the transaction date to 'ddmmyy'
         transaction_date_str = transaction.transaction_dt.strftime('%d%m%y')  # e.g., '210824'
@@ -377,7 +366,6 @@ def update_transaction(
 
         # 5. Construct the new transaction_id using the original num_id
         new_transaction_id = f'TT{original_num_id}{transaction_date_str}{channel_code}'
-        print("startupdate_data")
         # 6. Update the transaction fields
         update_data = transaction.dict(exclude_unset=True)  # Get the transaction data excluding unset fields
         for key, value in update_data.items():
@@ -465,7 +453,6 @@ def delete_transaction(
 
         # Convert transaction object to dictionary for sending to RabbitMQ
         transaction_data = object_as_dict(db_transaction)
-        print("db_transaction data:", transaction_data)
 
         delete_data_for_queue = {
             'transaction_id': transaction_id,
