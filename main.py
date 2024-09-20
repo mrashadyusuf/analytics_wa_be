@@ -16,6 +16,14 @@ from utilities.instagram import schedule_get_follower
 from routes.etl import data_transaksi, chat_wa, sum_transaksi, sum_average_sales, sum_customer, sum_model, sum_region, sum_sales_trend, sum_sales_trend_pertanggal, sum_store, sum_top_produk, sum_wa, sum_customer_follower
 
 from database import engine, database
+from consumer.transaction_consumer import start_consumer  
+import threading
+
+# Function to start the consumer in a separate thread
+def run_consumer_in_background():
+    consumer_thread = threading.Thread(target=start_consumer)
+    consumer_thread.daemon = True  # This makes sure the thread exits when the main program does
+    consumer_thread.start()
 
 app = FastAPI()
 @app.get("/")
@@ -57,6 +65,7 @@ async def startup():
     # sched.add_job(run_get_follower, trigger='interval', minutes=60)
     # sched.start()
 
+    run_consumer_in_background()
 
 @app.on_event("shutdown")
 async def shutdown():
