@@ -12,11 +12,10 @@ router = APIRouter()
 
 from datetime import date, datetime
 import pandas as pd
-import duckdb
 from io import BytesIO
 from fastapi import HTTPException, status
 from sqlalchemy.orm import Session
-from sqlalchemy import desc
+from sqlalchemy import desc,inspect, or_
 import os
 import boto3
 from botocore.exceptions import ClientError
@@ -34,29 +33,7 @@ aws_secret_key = os.getenv("SECRET_KEY")
 aws_region = os.getenv("REGION")
 
 
-def get_duckdb_connection():
 
-    if not aws_access_key or not aws_secret_key:
-        raise ValueError("AWS credentials are not set in the environment variables.")
-
-    # Create a DuckDB connection
-    duckdb_conn = duckdb.connect()
-    print("DuckDB connection established.")
-
-    # Configure S3 credentials for DuckDB
-    duckdb_conn.execute(f"""
-        CREATE SECRET (
-            TYPE S3,
-            KEY_ID '{aws_access_key}',
-            SECRET '{aws_secret_key}',
-            REGION '{aws_region}'
-        );
-    """)
-    print("AWS S3 credentials configured.")
-    
-    return duckdb_conn
-
-duckdb_conn = get_duckdb_connection()
 
 def generate_bucket_name(user_group: str) -> str:
     return f'customer-{user_group.lower()}'
@@ -90,54 +67,62 @@ def get_latest_transaction_file_from_s3(bucket_name: str):
     return latest_file_key  # Return the key of the latest file
 
 
-
-@router.post("/", status_code=status.HTTP_200_OK)
+@router.post("/", response_model=TransactionInDB, status_code=status.HTTP_200_OK)
 def create_transaction(
     transaction: TransactionCreate, 
+    db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)  # JWT authentication
 ):
     try:
-        print("Starting transaction queuing process...")
-        user_group = current_user.group
-
-        # 1. AWS S3 credentials and path configuration
-        bucket_name = generate_bucket_name(user_group)
-
-        # variable to get the latest parquet file
-        latest_parquet_file_name = get_latest_transaction_file_from_s3(bucket_name)
-        s3_path_latest = f"s3://{bucket_name}/{latest_parquet_file_name}"
-
-        # 2. Try to read the existing Parquet file from S3
-        fs = s3fs.S3FileSystem(key=aws_access_key, secret=aws_secret_key)
-        try:
-            existing_data_df = pd.read_parquet(s3_path_latest, filesystem=fs)
-            print("Existing data loaded from S3.")
-        except Exception:
-            print("Parquet file not found or unreadable. Creating a new one.")
-            existing_data_df = pd.DataFrame()
-
-        # 3. Generate new_num_id based on the last transaction in the existing Parquet file
-        if not existing_data_df.empty:
-            last_transaction = existing_data_df.iloc[-1]
-            last_num_id = int(last_transaction['transaction_id'][2:6])  # Extract the numeric part from 'TTxxxx'
-            new_num_id = str(last_num_id + 1).zfill(4)  # Increment and zero-fill to 4 digits
-        else:
-            new_num_id = '0001'  # Start with '0001' if no transactions exist
-
-        print(f"Generated new_num_id: {new_num_id}")
-
-        # 4. Generate Transaction ID
-        transaction_date_str = transaction.transaction_dt.strftime('%d%m%y')
-        channel_code = transaction.transaction_channel[:2].upper()
-        transaction_id = f'TT{new_num_id}{transaction_date_str}{channel_code}'
+        print("Starting transaction process with PostgreSQL and RabbitMQ...")
+        # 1. Retrieve the last created transaction in PostgreSQL
+        last_transaction = db.query(Transaction).order_by(
+            desc(Transaction.created_dt),
+            desc(Transaction.transaction_id)
+        ).first()
         
-        print(f"Generated transaction ID: {transaction_id}")
+        if last_transaction:
+            # Extract the numeric part from the last transaction ID
+            last_num_id = int(last_transaction.transaction_id[2:6])  # e.g., 0005 -> 5
+            # Increment the numeric part by 1
+            new_num_id = str(last_num_id + 1).zfill(4)  # e.g., '0006'
+        else:
+            # If no previous transactions exist, start with '0001'
+            new_num_id = '0001'
 
-        # Prepare transaction data to be queued
-        transaction_data = {
+        # 2. Format the transaction date to 'ddmmyy'
+        transaction_date_str = transaction.transaction_dt.strftime('%d%m%y')  # e.g., '210824'
+
+        # 3. Extract the first two characters from the transaction channel
+        channel_code = transaction.transaction_channel[:2].upper()  # e.g., 'ON'
+
+        # 4. Construct the transaction_id
+        transaction_id = f'TT{new_num_id}{transaction_date_str}{channel_code}'
+
+        # 5. Check if the generated transaction_id already exists in PostgreSQL
+        existing_transaction = db.query(Transaction).filter(Transaction.transaction_id == transaction_id).first()
+        if existing_transaction:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Transaction ID already exists")
+
+        # 6. Prepare the data for insertion into PostgreSQL
+        transaction_data = transaction.dict(exclude={'transaction_id'})
+
+        # 7. Insert the new transaction into PostgreSQL
+        db_transaction = Transaction(
+            transaction_id=transaction_id,
+            **transaction_data
+        )
+        db.add(db_transaction)
+        db.commit()
+        db.refresh(db_transaction)
+
+        print(f"Transaction inserted into PostgreSQL with ID: {transaction_id}")
+
+        # 8. Prepare transaction data to be queued in RabbitMQ for Parquet insertion
+        transaction_data_for_queue = {
             'transaction_id': transaction_id,
             'transaction_channel': transaction.transaction_channel,
-            'transaction_dt': transaction.transaction_dt.strftime('%Y-%m-%d %H:%M:%S'),
+            'transaction_dt': transaction.transaction_dt.strftime('%Y-%m-%d'),
             'model_product': transaction.model_product,
             'kuantitas': transaction.kuantitas,
             'price_product': transaction.price_product,
@@ -150,33 +135,38 @@ def create_transaction(
             'created_by': current_user.username,
             'created_dt': transaction.created_dt.strftime('%Y-%m-%d %H:%M:%S'),
             'updated_by': current_user.username,
-            'updated_dt': transaction.updated_dt.strftime('%Y-%m-%d %H:%M:%S')
+            'updated_dt': transaction.updated_dt.strftime('%Y-%m-%d %H:%M:%S'),
+            'user_group': current_user.group
         }
-        transaction_data['user_group'] = user_group
-        # 5. Connect to RabbitMQ and publish transaction data
+
+        # 9. Connect to RabbitMQ and publish transaction data
         connection = pika.BlockingConnection(pika.ConnectionParameters('localhost'))  # Adjust RabbitMQ server address if necessary
         channel = connection.channel()
 
         # Declare a queue (if not already exists)
         channel.queue_declare(queue='transaction_queue', durable=True)
 
-        # Publish the message
+        # Publish the message to RabbitMQ
         channel.basic_publish(
             exchange='',
             routing_key='transaction_queue',
-            body=json.dumps(transaction_data),
+            body=json.dumps(transaction_data_for_queue),
             properties=pika.BasicProperties(
                 delivery_mode=2,  # Make the message persistent
             )
         )
 
-        print(f"Transaction queued successfully with ID: {transaction_id}")
+        print(f"Transaction queued successfully with ID: {transaction_id} for Parquet insertion")
 
-        # Close the connection
+        # Close the RabbitMQ connection
         connection.close()
 
-        return {"status": f"Transaction {transaction_id} queued successfully."}
-
+        # 10. Return the newly created transaction from PostgreSQL
+        return db_transaction
+    
+    except HTTPException as http_exc:
+        # Re-raise the HTTPException to ensure FastAPI handles it
+        raise http_exc
     except Exception as e:
         print(f"Internal Server Error: {str(e)}")
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Internal Server Error")
@@ -185,6 +175,7 @@ def create_transaction(
 @router.post("/group", status_code=status.HTTP_200_OK)
 def create_transactions_in_batch(
     transactions: List[TransactionCreate],  # Accept an array of transactions
+    db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)  # JWT authentication
 ):
     try:
@@ -200,12 +191,52 @@ def create_transactions_in_batch(
         # Declare the queue
         channel.queue_declare(queue='transaction_queue', durable=True)
 
+        # Prepare a list to collect all transaction data for the batch
+        transaction_batch_data = []
+
         # Process each transaction in the batch
         for transaction in transactions:
-            # Prepare transaction data to be sent to RabbitMQ
-            transaction_data = {
+            # Retrieve the last created transaction in PostgreSQL
+            last_transaction = db.query(Transaction).order_by(
+                desc(Transaction.created_dt),
+                desc(Transaction.transaction_id)
+            ).first()
+            if last_transaction:
+                last_num_id = int(last_transaction.transaction_id[2:6])  # Extract numeric part, e.g., '0005' -> 5
+                new_num_id = str(last_num_id + 1).zfill(4)  # Increment by 1 and zero-fill, e.g., '0006'
+            else:
+                new_num_id = '0001'  # If no previous transactions, start with '0001'
+            # Format the transaction date and extract channel code
+            transaction_date_str = transaction.transaction_dt.strftime('%d%m%y')  # Format 'ddmmyy'
+            channel_code = transaction.transaction_channel[:2].upper()  # Get first two characters of the channel
+
+            # Construct the transaction_id
+            transaction_id = f'TT{new_num_id}{transaction_date_str}{channel_code}'
+
+            # Check if transaction ID already exists
+            existing_transaction = db.query(Transaction).filter(Transaction.transaction_id == transaction_id).first()
+            if existing_transaction:
+                raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Transaction ID already exists")
+
+            # Prepare the transaction data for PostgreSQL insertion
+            transaction_data = transaction.dict(exclude={'transaction_id'})
+            db_transaction = Transaction(
+                transaction_id=transaction_id,
+                **transaction_data
+            )
+
+            # Insert into PostgreSQL
+            db.add(db_transaction)
+            db.commit()
+            db.refresh(db_transaction)
+
+            print(f"Transaction inserted into PostgreSQL with ID: {transaction_id}")
+
+            # Prepare transaction data to be queued in RabbitMQ for Parquet insertion
+            transaction_data_for_queue = {
+                'transaction_id': transaction_id,
                 'transaction_channel': transaction.transaction_channel,
-                'transaction_dt': transaction.transaction_dt.strftime('%Y-%m-%d %H:%M:%S'),
+                'transaction_dt': transaction.transaction_dt.strftime('%Y-%m-%d'),
                 'model_product': transaction.model_product,
                 'kuantitas': transaction.kuantitas,
                 'price_product': transaction.price_product,
@@ -219,26 +250,32 @@ def create_transactions_in_batch(
                 'created_dt': transaction.created_dt.strftime('%Y-%m-%d %H:%M:%S'),
                 'updated_by': current_user.username,
                 'updated_dt': transaction.updated_dt.strftime('%Y-%m-%d %H:%M:%S'),
-                'user_group': user_group  # Add user_group to transaction
+                'user_group': user_group  # Add user_group to the transaction data
             }
 
-            # Publish the transaction to RabbitMQ
-            channel.basic_publish(
-                exchange='',
-                routing_key='transaction_batch_queue',
-                body=json.dumps(transaction_data),  # Serialize transaction_data as JSON
-                properties=pika.BasicProperties(
-                    delivery_mode=2,  # Make the message persistent
-                )
+
+            # Append each transaction data to the batch list
+            transaction_batch_data.append(transaction_data_for_queue)
+        # Publish the entire batch of transactions as an array to RabbitMQ
+        channel.basic_publish(
+            exchange='',
+            routing_key='transaction_queue',
+            body=json.dumps(transaction_batch_data[0]),  # Serialize transaction_batch_data as JSON array
+            properties=pika.BasicProperties(
+                delivery_mode=2,  # Make the message persistent
             )
-            print(f"Published transaction for {transaction.name_cust} to RabbitMQ.")
+        )
+        print(f"Published batch of {len(transactions)} transactions to RabbitMQ.")
 
         # Close the RabbitMQ connection
         connection.close()
 
         print("Batch transactions sent to RabbitMQ successfully.")
-        return {"status": "Batch transactions sent to RabbitMQ"}
+        return {"status": f"Batch of {len(transactions)} transactions sent to RabbitMQ"}
 
+    except HTTPException as http_exc:
+        # Re-raise the HTTPException to ensure FastAPI handles it
+        raise http_exc
     except Exception as e:
         print(f"Internal Server Error: {str(e)}")
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Internal Server Error")
@@ -246,213 +283,232 @@ def create_transactions_in_batch(
 
 @router.get("/", status_code=status.HTTP_200_OK)
 def read_transactions(
-    offset: int = 0,  # Pagination offset
-    limit: int = 10,  # Pagination limit
-    search: str = "",  # Search query
-    db: Session = Depends(get_db),  # This might not be needed, remove if not used elsewhere
+    offset: int = 0,  # Changed parameter name from skip to offset
+    limit: int = 10, 
+    search: str = "",  # Added search parameter
+    db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)  # JWT authentication
 ):
-    try:
-        print("Starting transaction retrieval process...")
+    # Base query
+    query = db.query(Transaction)
+    
+    # Apply search filter if search term is provided
+    if search:
+        search_filter = or_(
+            Transaction.transaction_id.ilike(f"%{search}%"),
+            Transaction.transaction_channel.ilike(f"%{search}%"),
+            Transaction.model_product.ilike(f"%{search}%"),
+            Transaction.price_product.ilike(f"%{search}%"),
+            Transaction.no_hp_cust.ilike(f"%{search}%"),
+            Transaction.name_cust.ilike(f"%{search}%"),
+            Transaction.city_cust.ilike(f"%{search}%"),
+            Transaction.prov_cust.ilike(f"%{search}%"),
+            Transaction.address_cust.ilike(f"%{search}%"),
+            Transaction.instagram_cust.ilike(f"%{search}%"),
+            Transaction.created_by.ilike(f"%{search}%"),
+            Transaction.updated_by.ilike(f"%{search}%"),
+            # You can add more fields as needed
+        )
+        query = query.filter(search_filter)
+    
+    # Query for the total count of the filtered transactions
+    total_all_data = query.count()
+        
+    # Query for the paginated transactions
+    transactions = query.order_by(desc(Transaction.created_dt)).offset(offset).limit(limit).all()
+    
+    total_data = len(transactions)
 
-        bucket_name = generate_bucket_name(current_user.group) 
-        latest_file_key = get_latest_transaction_file_from_s3(bucket_name)
-        print(f"Latest file selected: {latest_file_key}")
+    # Return the transactions, the total count, the total count of all data, and the offset
+    return {
+        "total_data": total_data,
+        "total_all_data": total_all_data,
+        "offset": offset,
+        "transactions": transactions
+    }
 
-
-
-        # 4. Form the S3 path for the latest file
-        s3_path = f"s3://{bucket_name}/{latest_file_key}"
-
-        # 5. Load the Parquet file from S3 into a DataFrame
-        query = f"SELECT * FROM read_parquet('{s3_path}')"
-
-        # 6. Apply search filter if a search term is provided
-        if search:
-            search_conditions = f"""
-            WHERE
-                transaction_id ILIKE '%{search}%' OR
-                transaction_channel ILIKE '%{search}%' OR
-                model_product ILIKE '%{search}%' OR
-                price_product ILIKE '%{search}%' OR
-                no_hp_cust ILIKE '%{search}%' OR
-                name_cust ILIKE '%{search}%' OR
-                city_cust ILIKE '%{search}%' OR
-                prov_cust ILIKE '%{search}%' OR
-                address_cust ILIKE '%{search}%' OR
-                instagram_cust ILIKE '%{search}%' OR
-                created_by ILIKE '%{search}%' OR
-                updated_by ILIKE '%{search}%'
-            """
-            query += search_conditions
-
-        # 7. Add sorting and pagination
-        query += f" ORDER BY updated_dt DESC LIMIT {limit} OFFSET {offset}"
-
-        # Execute the query
-        df = duckdb_conn.execute(query).fetchdf()
-        print("Data loaded and filtered from S3 parquet file.")
-
-        # 8. Get the total count of the filtered transactions
-        count_query = f"SELECT COUNT(*) FROM read_parquet('{s3_path}')"
-        if search:
-            count_query += search_conditions
-
-        total_all_data = duckdb_conn.execute(count_query).fetchone()[0]
-
-        total_data = len(df)
-
-        # Convert DataFrame to a list of dictionaries to return as JSON
-        transactions = df.to_dict(orient='records')
-
-        # 9. Return the transactions, the total count, the total count of all data, and the offset
-        return {
-            "total_data": total_data,
-            "total_all_data": total_all_data,
-            "offset": offset,
-            "transactions": transactions
-        }
-
-    except Exception as e:
-        print(f"Internal Server Error: {str(e)}")
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Internal Server Error")
 
 
 @router.get("/{transaction_id}", response_model=TransactionInDB,  status_code=status.HTTP_200_OK)
-def read_transaction_by_id(
+def read_transaction(
     transaction_id: str,  # Change type to str since transaction_id is not an integer
-    db: Session = Depends(get_db),  # This might not be needed, remove if not used elsewhere
+    db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)  # JWT authentication
 ):
-    try:
-        print("Starting transaction retrieval process...")
+    transaction = db.query(Transaction).filter(Transaction.transaction_id == transaction_id).first()
+    if not transaction:
+        raise HTTPException(status_code=404, detail="Transaction not found")
+    return transaction
 
-        # 1. Get the DuckDB connection using the helper function
-        ()
-
-        # 2. Form the S3 path
-        user_group = current_user.group
-        bucket_name = generate_bucket_name(user_group) 
-        parquet_file_name = get_latest_transaction_file_from_s3(bucket_name)
-        s3_path = f"s3://{bucket_name}/{parquet_file_name}"
-
-        # 3. Load the Parquet file from S3 and filter by transaction_id using a SQL WHERE clause
-        try:
-            query = f"""
-            SELECT * FROM read_parquet('{s3_path}')
-            WHERE transaction_id = '{transaction_id}'
-            """
-            transaction_df = duckdb_conn.execute(query).fetchdf()
-            print("Transaction data loaded from S3 parquet file.")
-        except Exception as e:
-            print(f"Failed to read parquet file from S3: {str(e)}")
-            raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to read parquet file from S3")
-
-        # 4. Check if the transaction was found
-        if transaction_df.empty:
-            raise HTTPException(status_code=404, detail="Transaction not found")
-
-        # 5. Check if the transaction was found
-        if transaction_df.empty:
-            raise HTTPException(status_code=404, detail="Transaction not found")
-
-        # Convert the first (and only) result to a dictionary
-        transaction_data = transaction_df.iloc[0].to_dict()
-
-        # 6. Return the transaction data
-        return TransactionInDB(**transaction_data)
-
-    except Exception as e:
-        print(f"Internal Server Error: {str(e)}")
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Internal Server Error")
-
-
-@router.put("/{transaction_id}", status_code=status.HTTP_200_OK)
+@router.put("/{transaction_id}", response_model=TransactionInDB, status_code=status.HTTP_200_OK)
 def update_transaction(
     transaction_id: str,  # Existing transaction ID to be updated
     transaction: TransactionUpdate, 
+    db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)  # JWT authentication
 ):
     try:
-        print("Publishing transaction update request to RabbitMQ...")
-        print("transaction update",transaction)
-        transaction.transaction_dt = transaction.transaction_dt.strftime('%Y-%m-%d')
-        transaction.created_dt = transaction.created_dt.strftime('%Y-%m-%d %H:%M:%S')
-        transaction.updated_dt = transaction.updated_dt.strftime('%Y-%m-%d %H:%M:%S')
-        # Prepare the data to be sent to RabbitMQ
-        update_data = {
+        print(f"Starting transaction update for transaction ID {transaction_id}...")
+
+        # 1. Fetch the existing transaction record from PostgreSQL
+        db_transaction = db.query(Transaction).filter(Transaction.transaction_id == transaction_id).first()
+        if not db_transaction:
+            raise HTTPException(status_code=404, detail="Transaction not found")
+
+        # 2. Extract the original num_id from the existing transaction_id
+        original_num_id = transaction_id[2:6]  # Extract characters 3 to 6
+
+        # 3. Format the transaction date to 'ddmmyy'
+        transaction_date_str = transaction.transaction_dt.strftime('%d%m%y')  # e.g., '210824'
+
+        # 4. Extract the first two characters from the transaction channel
+        channel_code = transaction.transaction_channel[:2].upper()  # e.g., 'ON'
+
+        # 5. Construct the new transaction_id using the original num_id
+        new_transaction_id = f'TT{original_num_id}{transaction_date_str}{channel_code}'
+        # 6. Update the transaction fields
+        update_data = transaction.dict(exclude_unset=True)  # Get the transaction data excluding unset fields
+        for key, value in update_data.items():
+            setattr(db_transaction, key, value)
+
+        # 7. Update the transaction_id
+        db_transaction.transaction_id = new_transaction_id
+
+        # 8. Update the timestamps
+        db_transaction.updated_by = current_user.username
+
+        # 9. Commit the transaction and refresh the record in PostgreSQL
+        db.commit()
+        db.refresh(db_transaction)
+        
+
+        print(f"Transaction {transaction_id} updated in PostgreSQL with new ID {new_transaction_id}.")
+        # 10. Prepare the data to be sent to RabbitMQ
+        update_data_for_queue = {
             'transaction_id': transaction_id,
-            'transaction_data': transaction.dict(exclude_unset=True),
-            'user_group': current_user.group,
-            'username': current_user.username
+            'transaction_channel': update_data['transaction_channel'],
+            'transaction_dt': update_data['transaction_dt'].strftime('%Y-%m-%d'),
+            'model_product': update_data['model_product'],
+            'kuantitas': update_data['kuantitas'],
+            'price_product': update_data['price_product'],
+            'no_hp_cust': update_data['no_hp_cust'],
+            'name_cust': update_data['name_cust'],
+            'city_cust': update_data['city_cust'],
+            'prov_cust': update_data['prov_cust'],
+            'address_cust': update_data['address_cust'],
+            'instagram_cust': update_data['instagram_cust'],
+            'created_by': current_user.username,
+            'created_dt': update_data['created_dt'].strftime('%Y-%m-%d %H:%M:%S'),
+            'updated_by': current_user.username,
+            'updated_dt': update_data['updated_dt'].strftime('%Y-%m-%d %H:%M:%S'),
+            'user_group': current_user.group
         }
 
-        # Setup RabbitMQ connection and publish the update message
+        # 11. Setup RabbitMQ connection and publish the update message
         credentials = pika.PlainCredentials('guest', 'guest')
         connection = pika.BlockingConnection(pika.ConnectionParameters('localhost', 5672, '/', credentials))
         channel = connection.channel()
 
         # Declare the update queue if it doesn't already exist
-        channel.queue_declare(queue='transaction_update_queue', durable=True)
+        channel.queue_declare(queue='transaction_queue', durable=True)
 
         # Publish the update message to RabbitMQ
         channel.basic_publish(
             exchange='',
-            routing_key='transaction_update_queue',
-            body=json.dumps(update_data),  # Serialize the update_data to JSON
+            routing_key='transaction_queue',
+            body=json.dumps(update_data_for_queue),  # Serialize the update_data to JSON
             properties=pika.BasicProperties(
                 delivery_mode=2,  # Make message persistent
             )
         )
 
-        print(f"Update request for transaction ID {transaction_id} sent to RabbitMQ.")
+        print(f"Update request for transaction ID {new_transaction_id} sent to RabbitMQ.")
         connection.close()
 
-        return {"status": "Update request sent to RabbitMQ", "transaction_id": transaction_id}
-
+        # 12. Return the updated transaction
+        return db_transaction
+    except HTTPException as http_exc:
+        # Re-raise the HTTPException to ensure FastAPI handles it
+        raise http_exc
     except Exception as e:
         print(f"Internal Server Error: {str(e)}")
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Internal Server Error")
 
 
-@router.delete("/{transaction_id}",   status_code=status.HTTP_200_OK)
+def object_as_dict(obj):
+    return {c.key: getattr(obj, c.key) for c in inspect(obj).mapper.column_attrs}
+
+@router.delete("/{transaction_id}", status_code=status.HTTP_200_OK)
 def delete_transaction(
-    transaction_id: str,  # Existing transaction ID to delete
+    transaction_id: str,  # Change type to str since transaction_id is not an integer
+    db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)  # JWT authentication
 ):
     try:
-        print("Publishing delete transaction request to RabbitMQ...")
+        # 1. Fetch the transaction to be deleted
+        db_transaction = db.query(Transaction).filter(Transaction.transaction_id == transaction_id).first()
 
-        # Prepare the data to be sent to RabbitMQ
-        delete_data = {
+        if not db_transaction:
+            raise HTTPException(status_code=404, detail="Transaction not found")
+
+        # Convert transaction object to dictionary for sending to RabbitMQ
+        transaction_data = object_as_dict(db_transaction)
+
+        delete_data_for_queue = {
             'transaction_id': transaction_id,
-            'user_group': current_user.group,
-            'username': current_user.username
+            'transaction_channel': transaction_data['transaction_channel'],
+            'transaction_dt': transaction_data['transaction_dt'].strftime('%Y-%m-%d'),
+            'model_product': transaction_data['model_product'],
+            'kuantitas': transaction_data['kuantitas'],
+            'price_product': transaction_data['price_product'],
+            'no_hp_cust': transaction_data['no_hp_cust'],
+            'name_cust': transaction_data['name_cust'],
+            'city_cust': transaction_data['city_cust'],
+            'prov_cust': transaction_data['prov_cust'],
+            'address_cust': transaction_data['address_cust'],
+            'instagram_cust': transaction_data['instagram_cust'],
+            'created_by': current_user.username,
+            'created_dt': transaction_data['created_dt'].strftime('%Y-%m-%d %H:%M:%S'),
+            'updated_by': current_user.username,
+            'updated_dt': transaction_data['updated_dt'].strftime('%Y-%m-%d %H:%M:%S'),
+            'user_group': current_user.group
         }
 
-        # Setup RabbitMQ connection and publish the delete message
-        credentials = pika.PlainCredentials('guest', 'guest')
-        connection = pika.BlockingConnection(pika.ConnectionParameters('localhost', 5672, '/', credentials))
-        channel = connection.channel()
+        # 2. Delete the transaction from the database
+        db.delete(db_transaction)
+        db.commit()
 
-        # Declare the delete queue if it doesn't already exist
-        channel.queue_declare(queue='transaction_delete_queue', durable=True)
+        # 3. Setup RabbitMQ connection and publish the delete message
+        try:
+            credentials = pika.PlainCredentials('guest', 'guest')
+            connection = pika.BlockingConnection(pika.ConnectionParameters('localhost', 5672, '/', credentials))
+            channel = connection.channel()
 
-        # Publish the delete message to RabbitMQ
-        channel.basic_publish(
-            exchange='',
-            routing_key='transaction_delete_queue',
-            body=json.dumps(delete_data),  # Serialize the delete_data to JSON
-            properties=pika.BasicProperties(
-                delivery_mode=2,  # Make message persistent
+            # Declare the queue if it doesn't already exist
+            channel.queue_declare(queue='transaction_queue', durable=True)
+
+            # Publish the delete message to RabbitMQ
+            channel.basic_publish(
+                exchange='',
+                routing_key='transaction_queue',
+                body=json.dumps(delete_data_for_queue),  # Serialize the delete_data to JSON
+                properties=pika.BasicProperties(
+                    delivery_mode=2,  # Make message persistent
+                )
             )
-        )
+            print(f"Transaction {transaction_id} delete message sent to RabbitMQ.")
+            connection.close()
 
-        print(f"Delete request for transaction ID {transaction_id} sent to RabbitMQ.")
-        connection.close()
+        except Exception as rabbitmq_error:
+            print(f"Failed to publish delete message to RabbitMQ: {str(rabbitmq_error)}")
+            raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to publish delete message to RabbitMQ")
 
-        return {"status": "Delete request sent to RabbitMQ", "transaction_id": transaction_id}
+        # 4. Return success response
+        return {"status": "Delete Transaction Success", "transaction_id": transaction_id}
 
+    except HTTPException as http_exc:
+        # Handle specific HTTP exceptions and re-raise them
+        raise http_exc
     except Exception as e:
         print(f"Internal Server Error: {str(e)}")
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Internal Server Error")
