@@ -26,6 +26,8 @@ Base = declarative_base()
 # SessionLocal is the session maker for SQLAlchemy ORM
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
+conn = engine.connect().execution_options(autocommit=True)
+
 # Dependency to get the session
 def get_db():
     db = SessionLocal()

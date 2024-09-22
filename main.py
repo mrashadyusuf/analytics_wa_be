@@ -8,6 +8,11 @@ from auth import get_current_user, User
 from routes.auth import router as auth_router
 from routes.transaction import router as transaction_router
 from routes.test import router as test_router
+from routes.etl import etl
+import asyncio
+from apscheduler.schedulers.background import BackgroundScheduler
+from utilities.instagram import schedule_get_follower
+
 from database import engine, database
 from consumer.transaction_consumer import start_consumer  
 import threading
@@ -19,9 +24,14 @@ def run_consumer_in_background():
     consumer_thread.start()
 
 app = FastAPI()
+@app.get("/")
+async def root():
+    return {"message": "TLE API version 1.0"}
+
 @app.on_event("startup")
 async def startup():
     await database.connect()
+
     run_consumer_in_background()
 
 @app.on_event("shutdown")
@@ -82,6 +92,7 @@ def add_security_headers(app):
 app.include_router(auth_router, prefix="/auth")
 app.include_router(transaction_router, prefix="/transactions")
 app.include_router(test_router, prefix="/test")
+app.include_router(etl, prefix="/etl")
 
 # Add CORS and security headers
 app = add_security_headers(cors_headers(app))
