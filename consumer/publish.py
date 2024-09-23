@@ -1,9 +1,21 @@
 import pika
 import json
+import os
+
 def publish_to_rabbitmq(queue_name: str, message: dict):
     try:
-        # Establish RabbitMQ connection
-        connection = pika.BlockingConnection(pika.ConnectionParameters('localhost'))  # Adjust as necessary
+        # Fetch RabbitMQ connection parameters from the environment
+        rabbitmq_host = os.getenv('RABBITMQ_HOST', 'localhost')
+        rabbitmq_port = int(os.getenv('RABBITMQ_PORT', 5672))
+        rabbitmq_user = os.getenv('RABBITMQ_USER', 'guest')
+        rabbitmq_password = os.getenv('RABBITMQ_PASSWORD', 'guest')
+
+        # Set up RabbitMQ credentials using the environment values
+        credentials = pika.PlainCredentials(rabbitmq_user, rabbitmq_password)
+        connection_params = pika.ConnectionParameters(rabbitmq_host, rabbitmq_port, '/', credentials)
+
+        # Establish RabbitMQ connection using BlockingConnection
+        connection = pika.BlockingConnection(connection_params)
         channel = connection.channel()
 
         # Declare the queue (ensures the queue exists)

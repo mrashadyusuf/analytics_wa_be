@@ -6,10 +6,15 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 from database import SessionLocal
 from models.models import Transaction
+import os
 
 from routes.transaction import generate_bucket_name, generate_parquet_file_name, aws_access_key, aws_secret_key, get_latest_transaction_file_from_s3
 # Function to process transaction and write it to S3 Parquet file
 
+rabbitmq_host = os.getenv('RABBITMQ_HOST', 'localhost')
+rabbitmq_port = int(os.getenv('RABBITMQ_PORT', 5672))
+rabbitmq_user = os.getenv('RABBITMQ_USER', 'guest')
+rabbitmq_password = os.getenv('RABBITMQ_PASSWORD', 'guest')
 
 
 def process_transaction(ch, method, properties, body):
@@ -65,8 +70,8 @@ def process_transaction(ch, method, properties, body):
 
 # RabbitMQ Consumer Setup
 def start_consumer():
-    credentials = pika.PlainCredentials('guest', 'guest')  # Replace with your credentials if needed
-    connection_params  = pika.ConnectionParameters('localhost', 5672, '/', credentials)
+    credentials = pika.PlainCredentials(rabbitmq_user, rabbitmq_password)  # Replace with your credentials if needed
+    connection_params  = pika.ConnectionParameters(rabbitmq_host, rabbitmq_port, '/', credentials)
     # Establish connection using BlockingConnection, not ConnectionParameters
     connection = pika.BlockingConnection(connection_params)
 
