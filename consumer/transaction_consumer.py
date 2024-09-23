@@ -4,9 +4,7 @@ import s3fs
 import pandas as pd
 import pyarrow as pa 
 import pyarrow.parquet as pq
-import duckdb
 from database import SessionLocal
-from schemas.schemas import TransactionCreate
 from models.models import Transaction
 
 from routes.transaction import generate_bucket_name, generate_parquet_file_name, aws_access_key, aws_secret_key, get_latest_transaction_file_from_s3

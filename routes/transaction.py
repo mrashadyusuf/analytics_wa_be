@@ -22,11 +22,9 @@ from botocore.exceptions import ClientError
 
 import pyarrow as pa
 import pyarrow.parquet as pq
-import s3fs
 
-import pika
-import json
 
+from consumer.publish import publish_to_rabbitmq
 # Retrieve AWS credentials from environment variables
 aws_access_key = os.getenv("ACCESS_KEY")
 aws_secret_key = os.getenv("SECRET_KEY")
@@ -139,27 +137,9 @@ def create_transaction(
             'user_group': current_user.group
         }
 
-        # 9. Connect to RabbitMQ and publish transaction data
-        connection = pika.BlockingConnection(pika.ConnectionParameters('localhost'))  # Adjust RabbitMQ server address if necessary
-        channel = connection.channel()
+        # 9. Publish transaction data to RabbitMQ
+        publish_to_rabbitmq('transaction_queue', transaction_data_for_queue)
 
-        # Declare a queue (if not already exists)
-        channel.queue_declare(queue='transaction_queue', durable=True)
-
-        # Publish the message to RabbitMQ
-        channel.basic_publish(
-            exchange='',
-            routing_key='transaction_queue',
-            body=json.dumps(transaction_data_for_queue),
-            properties=pika.BasicProperties(
-                delivery_mode=2,  # Make the message persistent
-            )
-        )
-
-        print(f"Transaction queued successfully with ID: {transaction_id} for Parquet insertion")
-
-        # Close the RabbitMQ connection
-        connection.close()
 
         # 10. Return the newly created transaction from PostgreSQL
         return db_transaction
@@ -181,15 +161,6 @@ def create_transactions_in_batch(
     try:
         print("Starting batch transaction creation process...")
         user_group = current_user.group
-
-        # Set up RabbitMQ connection and channel
-        credentials = pika.PlainCredentials('guest', 'guest')  # Modify if you use different credentials
-        connection_params = pika.ConnectionParameters('localhost', 5672, '/', credentials)  # Modify 'localhost' if necessary
-        connection = pika.BlockingConnection(connection_params)
-        channel = connection.channel()
-
-        # Declare the queue
-        channel.queue_declare(queue='transaction_queue', durable=True)
 
         # Prepare a list to collect all transaction data for the batch
         transaction_batch_data = []
@@ -256,19 +227,9 @@ def create_transactions_in_batch(
 
             # Append each transaction data to the batch list
             transaction_batch_data.append(transaction_data_for_queue)
-        # Publish the entire batch of transactions as an array to RabbitMQ
-        channel.basic_publish(
-            exchange='',
-            routing_key='transaction_queue',
-            body=json.dumps(transaction_batch_data[0]),  # Serialize transaction_batch_data as JSON array
-            properties=pika.BasicProperties(
-                delivery_mode=2,  # Make the message persistent
-            )
-        )
-        print(f"Published batch of {len(transactions)} transactions to RabbitMQ.")
 
-        # Close the RabbitMQ connection
-        connection.close()
+        # Publish the entire batch of transactions as an array to RabbitMQ
+        publish_to_rabbitmq('transaction_queue', transaction_data_for_queue)
 
         print("Batch transactions sent to RabbitMQ successfully.")
         return {"status": f"Batch of {len(transactions)} transactions sent to RabbitMQ"}
@@ -404,26 +365,9 @@ def update_transaction(
             'user_group': current_user.group
         }
 
-        # 11. Setup RabbitMQ connection and publish the update message
-        credentials = pika.PlainCredentials('guest', 'guest')
-        connection = pika.BlockingConnection(pika.ConnectionParameters('localhost', 5672, '/', credentials))
-        channel = connection.channel()
-
-        # Declare the update queue if it doesn't already exist
-        channel.queue_declare(queue='transaction_queue', durable=True)
 
         # Publish the update message to RabbitMQ
-        channel.basic_publish(
-            exchange='',
-            routing_key='transaction_queue',
-            body=json.dumps(update_data_for_queue),  # Serialize the update_data to JSON
-            properties=pika.BasicProperties(
-                delivery_mode=2,  # Make message persistent
-            )
-        )
-
-        print(f"Update request for transaction ID {new_transaction_id} sent to RabbitMQ.")
-        connection.close()
+        publish_to_rabbitmq('transaction_queue', update_data_for_queue)
 
         # 12. Return the updated transaction
         return db_transaction
@@ -478,32 +422,9 @@ def delete_transaction(
         db.delete(db_transaction)
         db.commit()
 
-        # 3. Setup RabbitMQ connection and publish the delete message
-        try:
-            credentials = pika.PlainCredentials('guest', 'guest')
-            connection = pika.BlockingConnection(pika.ConnectionParameters('localhost', 5672, '/', credentials))
-            channel = connection.channel()
+        # Publish the delete message to RabbitMQ
+        publish_to_rabbitmq('transaction_queue', delete_data_for_queue)
 
-            # Declare the queue if it doesn't already exist
-            channel.queue_declare(queue='transaction_queue', durable=True)
-
-            # Publish the delete message to RabbitMQ
-            channel.basic_publish(
-                exchange='',
-                routing_key='transaction_queue',
-                body=json.dumps(delete_data_for_queue),  # Serialize the delete_data to JSON
-                properties=pika.BasicProperties(
-                    delivery_mode=2,  # Make message persistent
-                )
-            )
-            print(f"Transaction {transaction_id} delete message sent to RabbitMQ.")
-            connection.close()
-
-        except Exception as rabbitmq_error:
-            print(f"Failed to publish delete message to RabbitMQ: {str(rabbitmq_error)}")
-            raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to publish delete message to RabbitMQ")
-
-        # 4. Return success response
         return {"status": "Delete Transaction Success", "transaction_id": transaction_id}
 
     except HTTPException as http_exc:
