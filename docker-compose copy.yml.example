@@ -1,0 +1,31 @@
+
+version: '3.8'
+
+services:
+  web:
+    image: crud_transaction_be:latest  # This is the name of the image to be built
+    ports:
+      - "8000:8000"
+    volumes:
+      - .:/app
+    working_dir: /app
+    env_file:
+      - .env
+    command: uvicorn main:app --host 0.0.0.0 --port 8000 --reload
+    build:
+      context: .
+      dockerfile: Dockerfile
+    depends_on:
+      - rabbitmq  # Ensure RabbitMQ starts before the web service
+    environment:
+      - RABBITMQ_HOST=rabbitmq  # Use the service name as the hostname
+      - RABBITMQ_PORT=5672  # Default RabbitMQ port
+
+  rabbitmq:
+    image: rabbitmq:3-management  # RabbitMQ image with the management interface
+    ports:
+      - "5672:5672"  # RabbitMQ port
+      - "15672:15672"  # RabbitMQ management console port
+    environment:
+      - RABBITMQ_DEFAULT_USER=guest
+      - RABBITMQ_DEFAULT_PASS=guest

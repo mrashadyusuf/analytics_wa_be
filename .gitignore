@@ -76,3 +76,5 @@ dmypy.json
 
 # FastAPI specific
 *.db
+
+docker-compose.yml
