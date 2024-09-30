@@ -4,20 +4,23 @@ from passlib.context import CryptContext
 from fastapi import Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer
 from pydantic import BaseModel
+from sqlalchemy.orm import Session
+from models.user import User as UserModel  # Adjusted to use UserModel for ORM
+import bcrypt
+from database import get_db
 
 # JWT configuration
-SECRET_KEY = "your-secret-key"
+SECRET_KEY = "your-secret-key"  # Use a strong secret key in production
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 30
 
-# Initialize CryptContext with bcrypt
+# Initialize CryptContext with bcrypt for password hashing
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
+# OAuth2 scheme for FastAPI (Bearer token)
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/auth/login")
 
-# In-memory "database" (replace with actual database in production)
-fake_users_db = {}
-
+# Token and User schemas for the API
 class Token(BaseModel):
     access_token: str
     token_type: str
@@ -33,12 +36,22 @@ class UserInDB(User):
     hashed_password: str
     group: str
 
+class UserData(BaseModel):
+    ms_user_id: str
+    ms_user_username: str
+    ms_user_email: str
+    ms_user_name: str
+    isactive: str
+    username: str
+
+# Password utility functions using Passlib's CryptContext
 def verify_password(plain_password, hashed_password):
     return pwd_context.verify(plain_password, hashed_password)
 
 def get_password_hash(password: str) -> str:
     return pwd_context.hash(password)
 
+# JWT creation function
 def create_access_token(data: dict, expires_delta: timedelta | None = None):
     to_encode = data.copy()
     if expires_delta:
@@ -49,22 +62,21 @@ def create_access_token(data: dict, expires_delta: timedelta | None = None):
     encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
     return encoded_jwt
 
-def get_user(db, username: str):
-    if username in db:
-        user_dict = db[username]
-        print("user_dict",user_dict)
-        return UserInDB(**user_dict)
-
-def authenticate_user(db, username: str, password: str):
-    user = get_user(db, username)
-    print("user0",user)
+# Authentication function to check user credentials from the DB
+def authenticate_user(db: Session, username: str, password: str):
+    # 1. Query the user from the database using the provided username
+    user = db.query(UserModel).filter(UserModel.ms_user_username == username).first()
     if not user:
         return False
-    if not verify_password(password, user.hashed_password):
+    
+    # 2. Verify the provided password with the hashed password in the DB
+    if not verify_password(password, user.ms_user_password):
         return False
-    return user
 
-async def get_current_user(token: str = Depends(oauth2_scheme)):
+    return user  # Return the user object if authentication succeeds
+
+# Function to get the current user based on the JWT token
+async def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)):
     try:
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
         username: str = payload.get("sub")
@@ -81,22 +93,22 @@ async def get_current_user(token: str = Depends(oauth2_scheme)):
             detail="Could not validate credentials",
             headers={"WWW-Authenticate": "Bearer"},
         )
-    user = get_user(fake_users_db, username=token_data.username)
+    
+    # Query the user from the actual database instead of using an in-memory db
+    user = db.query(UserModel).filter(UserModel.ms_user_username == token_data.username).first()
     if user is None:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Could not validate credentials",
             headers={"WWW-Authenticate": "Bearer"},
         )
-    return user
+    user_data = UserData(
+        ms_user_id=user.ms_user_id,
+        ms_user_username=user.ms_user_username,
+        ms_user_email=user.ms_user_email,
+        ms_user_name=user.ms_user_name,
+        isactive=user.isactive,
+        username=user.ms_user_username  # You can map ms_user_username to username
+    )
 
-def initialize_fake_db():
-    hashed_password = get_password_hash("admin")
-    fake_users_db["admin"] = {
-        "username": "admin",
-        "hashed_password": hashed_password,
-        "group":"teman-thrifty"
-    }
-
-# Initialize the database with the admin user
-initialize_fake_db()
+    return user_data

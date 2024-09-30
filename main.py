@@ -9,6 +9,10 @@ from routes.auth import router as auth_router
 from routes.transaction import router as transaction_router
 from routes.test import router as test_router
 from routes.etl import etl
+from routes.user import router as user_router
+from routes.group import router as group_router
+from routes.user_group import router as user_group_router
+
 import asyncio
 from apscheduler.schedulers.background import BackgroundScheduler
 from utilities.instagram import schedule_get_follower
@@ -93,6 +97,10 @@ app.include_router(auth_router, prefix="/auth")
 app.include_router(transaction_router, prefix="/transactions")
 app.include_router(test_router, prefix="/test")
 app.include_router(etl, prefix="/etl")
+app.include_router(user_router, prefix="/user")
+app.include_router(group_router, prefix="/group")
+app.include_router(user_group_router, prefix="/user_group")
+
 
 # Add CORS and security headers
 app = add_security_headers(cors_headers(app))
