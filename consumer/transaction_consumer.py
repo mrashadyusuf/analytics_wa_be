@@ -7,6 +7,8 @@ import pyarrow.parquet as pq
 from database import SessionLocal
 from models.models import Transaction
 import os
+from botocore.exceptions import ClientError
+import boto3
 
 from routes.transaction import generate_bucket_name, generate_parquet_file_name, aws_access_key, aws_secret_key, get_latest_transaction_file_from_s3
 # Function to process transaction and write it to S3 Parquet file
@@ -15,7 +17,42 @@ rabbitmq_host = os.getenv('RABBITMQ_HOST', 'localhost')
 rabbitmq_port = int(os.getenv('RABBITMQ_PORT', 5672))
 rabbitmq_user = os.getenv('RABBITMQ_USER', 'guest')
 rabbitmq_password = os.getenv('RABBITMQ_PASSWORD', 'guest')
+aws_region = os.getenv('REGION')
 
+def create_s3_bucket_if_not_exists(bucket_name):
+    print("awsreg:", aws_region)
+    
+    # Create boto3 S3 client with the correct region
+    s3_client = boto3.client('s3', 
+                             region_name=aws_region, 
+                             aws_access_key_id=aws_access_key, 
+                             aws_secret_access_key=aws_secret_key)
+    try:
+        # Check if the bucket exists
+        s3_client.head_bucket(Bucket=bucket_name)
+        print(f"Bucket {bucket_name} already exists.")
+    except ClientError as e:
+        # If bucket doesn't exist, create it
+        if e.response['Error']['Code'] == '404':
+            try:
+                if aws_region == 'us-east-1':
+                    # Special case for 'us-east-1', where no LocationConstraint is needed
+                    s3_client.create_bucket(Bucket=bucket_name)
+                else:
+                    # For all other regions, specify LocationConstraint
+                    s3_client.create_bucket(
+                        Bucket=bucket_name,
+                        CreateBucketConfiguration={
+                            'LocationConstraint': aws_region
+                        }
+                    )
+                print(f"Bucket {bucket_name} created in region {aws_region}.")
+            except ClientError as create_error:
+                print(f"Error creating bucket {bucket_name}: {create_error}")
+                raise
+        else:
+            print(f"Error checking bucket {bucket_name}: {e}")
+            raise
 
 def process_transaction(ch, method, properties, body):
     db = SessionLocal()  # Open a new session for database interaction
@@ -50,6 +87,10 @@ def process_transaction(ch, method, properties, body):
         bucket_name = generate_bucket_name(transaction_data['user_group'])  # Can still use the user_group from the message
         parquet_file_name = generate_parquet_file_name()
         s3_path = f"s3://{bucket_name}/{parquet_file_name}"
+
+        # Ensure the S3 bucket exists
+        create_s3_bucket_if_not_exists(bucket_name)
+
 
         # Create S3 file system object using s3fs
         fs = s3fs.S3FileSystem(key=aws_access_key, secret=aws_secret_key)

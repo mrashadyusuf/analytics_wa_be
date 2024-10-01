@@ -117,7 +117,7 @@ async def get_current_user(token: str = Depends(oauth2_scheme), db: Session = De
         ms_user_name=user.ms_user_name,
         isactive=user.isactive,
         username=user.ms_user_username ,
-        group="teman-thrifty"
+        group=user.ms_group_name
     )
 
     return user_data
