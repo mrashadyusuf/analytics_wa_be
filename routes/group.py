@@ -5,7 +5,7 @@ from models.group import Group
 from schemas.groupSchemas import GroupCreate, GroupUpdate, GroupResponse
 import uuid
 from datetime import datetime, timedelta
-from sqlalchemy import desc, or_
+from sqlalchemy import desc, or_, text
 from auth import get_current_user, User
 router = APIRouter()
 
@@ -16,6 +16,7 @@ def create_group(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
+    print("current_user",current_user)
     # 1. Generate a unique group ID
     new_group_id = str(uuid.uuid4())
 
@@ -24,10 +25,12 @@ def create_group(
         ms_group_id=new_group_id,
         ms_group_name=group.ms_group_name,
         isactive=group.isactive,
-        createdby=group.createdby,
+        createdby=current_user.username,
         created=datetime.utcnow() + timedelta(hours=7),
-        updatedby=current_user,
+        updatedby=current_user.username,
         updated = datetime.utcnow() + timedelta(hours=7),
+        url_dashboard_sales = group.url_dashboard_sales,
+        url_dashboard_customer = group.url_dashboard_customer,
     )
 
     # 3. Insert the new group into the database
@@ -83,6 +86,24 @@ def get_groups(
         print(f"Internal Server Error: {str(e)}")
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Internal Server Error")
 
+
+@router.get("/groupURLByName")
+def get_group_urls(group_name: str, db: Session = Depends(get_db)):
+    stmt = text("""
+        SELECT g.url_dashboard_sales, g.url_dashboard_customer
+        FROM ms_group g
+        WHERE g.ms_group_name = :group_name
+    """)
+    
+    result = db.execute(stmt, {"group_name": group_name}).fetchone()
+    if not result:
+        raise HTTPException(status_code=404, detail="Group not found")
+
+    return {
+        "url_dashboard_sales": result[0],
+        "url_dashboard_customer": result[1]
+    }
+
 # Read a single Group by ID
 @router.get("/{group_id}", response_model=GroupResponse, status_code=status.HTTP_200_OK)
 def get_group_by_id(group_id: str, db: Session = Depends(get_db),current_user: User = Depends(get_current_user),):
@@ -111,8 +132,10 @@ def update_group(
     # Update group details
     group.ms_group_name = group_update.ms_group_name
     group.isactive = group_update.isactive
-    group.updatedby = group_update.updatedby
+    group.updatedby = current_user.username
     group.updated = datetime.utcnow() + timedelta(hours=7)
+    group.url_dashboard_sales = group_update.url_dashboard_sales
+    group.url_dashboard_customer = group_update.url_dashboard_customer
 
     # Commit the changes
     db.commit()
@@ -134,3 +157,4 @@ def delete_group(group_id: str, db: Session = Depends(get_db),current_user: User
     db.commit()
 
     return {"message": "Group deleted successfully"}
+

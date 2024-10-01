@@ -6,10 +6,11 @@ from datetime import datetime
 class UserCreateUpdate(BaseModel):
     ms_user_name: str
     ms_user_username: str
-    ms_user_password: str
+    ms_user_password: Optional[str] = None
     ms_user_email: str
-    isactive: Optional[str] = '1'
+    isactive: Optional[str] = ' Y'
     ms_user_token: Optional[str] = ''
+    role: str
     created_by: Optional[str] = None
     updated_by: Optional[str] = None
 
@@ -20,10 +21,12 @@ class UserResponse(BaseModel):
     ms_user_username: str
     ms_user_email: str
     isactive: str
+    role: str
     created_dt: datetime
     created_by:str
     updated_dt: datetime
     updated_by: str
+    
 
     class Config:
         orm_mode = True

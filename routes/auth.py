@@ -20,6 +20,7 @@ class Token(BaseModel):
     access_token: str
     token_type: str
     group: str
+    role: str
     
 @router.post("/login", response_model=Token)
 async def login_for_access_token(login: LoginRequest, db: Session = Depends(get_db)):
@@ -58,7 +59,7 @@ async def login_for_access_token(login: LoginRequest, db: Session = Depends(get_
     if result is not None:
         group_name = result[0]
     # Return the access token, token type, and user group
-    return {"access_token": access_token, "token_type": "bearer", "group": group_name}
+    return {"access_token": access_token, "token_type": "bearer", "group": group_name,"role":user.role}
 
 # @router.post("/register", response_model=LoginRequest)
 # async def register_user(user: LoginRequest):

@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session
 from models.user import User as UserModel  # Adjusted to use UserModel for ORM
 import bcrypt
 from database import get_db
+from sqlalchemy import text
 
 # JWT configuration
 SECRET_KEY = "your-secret-key"  # Use a strong secret key in production
@@ -43,6 +44,7 @@ class UserData(BaseModel):
     ms_user_name: str
     isactive: str
     username: str
+    group: str
 
 # Password utility functions using Passlib's CryptContext
 def verify_password(plain_password, hashed_password):
@@ -94,8 +96,14 @@ async def get_current_user(token: str = Depends(oauth2_scheme), db: Session = De
             headers={"WWW-Authenticate": "Bearer"},
         )
     
-    # Query the user from the actual database instead of using an in-memory db
-    user = db.query(UserModel).filter(UserModel.ms_user_username == token_data.username).first()
+    stmt = text("""SELECT u.*, g.ms_group_name
+    FROM ms_user u
+    LEFT JOIN ms_user_group ug ON u.ms_user_id = ug.ms_user_id
+    LEFT JOIN ms_group g ON ug.ms_group_id = g.ms_group_id
+    WHERE u.ms_user_username = :username
+    LIMIT 1
+    """)
+    user = db.execute(stmt, {"username": token_data.username}).fetchone()
     if user is None:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -108,7 +116,8 @@ async def get_current_user(token: str = Depends(oauth2_scheme), db: Session = De
         ms_user_email=user.ms_user_email,
         ms_user_name=user.ms_user_name,
         isactive=user.isactive,
-        username=user.ms_user_username  # You can map ms_user_username to username
+        username=user.ms_user_username ,
+        group="teman-thrifty"
     )
 
     return user_data

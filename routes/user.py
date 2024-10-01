@@ -21,9 +21,6 @@ def create_user(
     current_user: User = Depends(get_current_user)  # JWT authentication
 ):
     try:
-        print("current_use2r",current_user)
-        print("Starting user creation process...")
-
         # 1. Check if username or email already exists
         existing_user = db.query(UserModel).filter(
             (UserModel.ms_user_username == user.ms_user_username) | (UserModel.ms_user_email == user.ms_user_email)
@@ -47,6 +44,7 @@ def create_user(
             ms_user_email=user.ms_user_email,
             isactive=user.isactive,
             ms_user_token=user.ms_user_token,
+            role = user.role,
             created_by=current_user.username,
             updated_by=current_user.username,
             created_dt=datetime.utcnow() + timedelta(hours=7),
@@ -175,17 +173,20 @@ def update_user(
         if not user:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
 
-        hashed_password = bcrypt.hashpw(user_update.ms_user_password.encode('utf-8'), bcrypt.gensalt())
-        print("hashed_password",hashed_password)
+        print("userpass",user_update.ms_user_password)
+        if (user_update.ms_user_password is not None):
+            hashed_password = bcrypt.hashpw(user_update.ms_user_password.encode('utf-8'), bcrypt.gensalt())
+            user.ms_user_password = hashed_password.decode('utf-8')
+
         # Update user details
         user.ms_user_name = user_update.ms_user_name
         user.ms_user_username = user_update.ms_user_username
-        user.ms_user_password = hashed_password.decode('utf-8')
         user.ms_user_email = user_update.ms_user_email
         user.isactive = user_update.isactive
         user.ms_user_token = user_update.ms_user_token
         user.updated_by = current_user.username
         user.updated_dt = datetime.utcnow() + timedelta(hours=7)
+        user.role = user_update.role
 
         # Commit the update
         db.commit()

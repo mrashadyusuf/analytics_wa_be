@@ -13,3 +13,5 @@ class Group(Base):
     created = Column(DateTime, default=datetime.utcnow)
     updatedby = Column(String(50), nullable=True)
     updated = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    url_dashboard_sales = Column(String(150), nullable=True)
+    url_dashboard_customer = Column(String(150), nullable=True)
