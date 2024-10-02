@@ -11,8 +11,10 @@ class UserCreateUpdate(BaseModel):
     isactive: Optional[str] = ' Y'
     ms_user_token: Optional[str] = ''
     role: str
+    phone_number: Optional[str] = None
     created_by: Optional[str] = None
     updated_by: Optional[str] = None
+    ms_group_id: Optional[str] = None
 
 # Schema for response (exclude sensitive fields like password)
 class UserResponse(BaseModel):
@@ -21,11 +23,14 @@ class UserResponse(BaseModel):
     ms_user_username: str
     ms_user_email: str
     isactive: str
-    role: str
-    created_dt: datetime
-    created_by:str
-    updated_dt: datetime
-    updated_by: str
+    role: Optional[str] = None
+    phone_number: Optional[str] = None
+    created_dt: Optional[datetime] = None
+    created_by: Optional[str] = None
+    updated_dt: Optional[datetime] = None
+    updated_by: Optional[str] = None
+    ms_group_id: Optional[str] = None
+
     
 
     class Config:

@@ -87,6 +87,32 @@ def get_groups(
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Internal Server Error")
 
 
+@router.get("/getGroupCombo", status_code=status.HTTP_200_OK)
+def get_all_groups(
+    db: Session = Depends(get_db)
+):
+    try:
+        print("Fetching all groups...")
+
+        # Base query selecting only group ID and name
+        query = db.query(Group.ms_group_id, Group.ms_group_name)
+
+        # Fetch all groups (no search, no limit)
+        groups = query.all()
+
+        # Format the response for autocomplete suggestions
+        response = [
+            {"ms_group_id": group.ms_group_id, "ms_group_name": group.ms_group_name}
+            for group in groups
+        ]
+
+        return response
+
+    except Exception as e:
+        print(f"Internal Server Error: {str(e)}")
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Internal Server Error")
+
+
 @router.get("/groupURLByName")
 def get_group_urls(group_name: str, db: Session = Depends(get_db)):
     stmt = text("""

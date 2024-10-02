@@ -205,6 +205,38 @@ def get_user_groups_by_group_id(
         print(f"Internal Server Error: {str(e)}")
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Internal Server Error")
 
+@router.get("/by-username", status_code=status.HTTP_200_OK)
+def get_user_group_by_username(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)  # JWT authentication
+):
+    try:
+        # Fetch the user based on the current user's username
+        user = db.query(User).filter(UserModel.ms_user_username == current_user.username).first()
+
+        if not user:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+
+        # Fetch the user group based on the user ID
+        user_group = db.query(UserGroup).filter(UserGroup.ms_user_id == user.ms_user_id).first()
+
+        if not user_group:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User group not found")
+
+        # Return the user group without pagination, as we're only expecting one result
+        return {
+            "ms_user_id": user_group.ms_user_id,
+            "ms_group_id": user_group.ms_group_id,
+            "created": user_group.created,
+            "updated": user_group.updated,
+        }
+
+    except HTTPException as http_exc:
+        raise http_exc
+    except Exception as e:
+        print(f"Internal Server Error: {str(e)}")
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Internal Server Error")
+
 
 
 # Delete a user group by its ms_user_group_id

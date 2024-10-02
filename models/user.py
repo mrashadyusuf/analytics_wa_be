@@ -15,6 +15,7 @@ class User(Base):
     ms_user_email = Column(String(50), nullable=False, unique=True)
     ms_user_token = Column(String(5))
     role = Column(String(25))
+    phone_number = Column(String(25))
     created_by = Column(String(50))
     created_dt = Column(DateTime, default=datetime.utcnow)
     updated_by = Column(String(50))
