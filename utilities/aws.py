@@ -9,6 +9,7 @@ from botocore.exceptions import ClientError
 import pandas as pd
 from io import BytesIO
 import pyarrow.parquet as pq
+from fastparquet import ParquetFile
 
 # Retrieve AWS credentials from environment variables
 aws_access_key = os.getenv("ACCESS_KEY")
@@ -210,6 +211,31 @@ def s3_path(bucket):
 
     return path
 
+def checkFileExist(path, data):
+    session = boto3.Session(
+        aws_access_key_id=aws_access_key,
+        aws_secret_access_key=aws_secret_key,
+        region_name=aws_region
+    )
+
+    s3 = session.client('s3')
+    path = path.replace("s3://", "")
+    bucket_name, key = path.split('/', 1)
+    
+    try:
+        s3.get_object(Bucket=bucket_name, Key=key)
+        print (f"FILE {key} exist.")
+        return True
+    except ClientError:
+        print (f"FILE {key} not exist.")
+        # Simpan DataFrame Parquet ke stream
+        buffer = BytesIO()
+        data.to_parquet(buffer, index=False)
+        buffer.seek(0)
+        
+        s3.put_object(Bucket=bucket_name, Key=key, Body=buffer.getvalue())
+        return False
+
 def getParquetFromAws(bucket, scheduler):
     session = boto3.Session(
         aws_access_key_id=aws_access_key,
@@ -232,13 +258,15 @@ def getParquetFromAws(bucket, scheduler):
     for obj in response.get('Contents', []):
         # Cek jika file adalah file parquet dan berdasarkan tanggal LastModified
         if obj['Key'].endswith('.parquet') :
-            kontak_name = obj['Key'].split('/')[1]
+            kontak_name = obj['Key'].split('/')[2]
             lastmodified = obj['LastModified'].strftime('%Y-%m-%d')
             if scheduler & (lastmodified == today):
                 # Mendapatkan file parquet dari S3
                 file_response = s3.get_object(Bucket=bucket_name, Key=obj['Key'])
                 file_stream = BytesIO(file_response['Body'].read())
-                df = pd.read_parquet(file_stream)
+                pf = ParquetFile(file_stream)
+                # df = pd.read_parquet(file_stream)
+                df = pf.to_pandas()          
 
                     # Mengambil informasi yang diinginkan dari file parquet
                 try:
@@ -267,8 +295,9 @@ def getParquetFromAws(bucket, scheduler):
                 # Mendapatkan file parquet dari S3
                 file_response = s3.get_object(Bucket=bucket_name, Key=obj['Key'])
                 file_stream = BytesIO(file_response['Body'].read())
-                df = pd.read_parquet(file_stream)
-                
+                pf = ParquetFile(file_stream)
+                # df = pd.read_parquet(file_stream)
+                df = pf.to_pandas()    
                 # Mengambil informasi yang diinginkan dari file parquet
                 try:
                     fromMe = df['fromMe'].iloc[0]
