@@ -45,6 +45,7 @@ class UserData(BaseModel):
     isactive: str
     username: str
     group: str
+    ms_group_id: str
 
 # Password utility functions using Passlib's CryptContext
 def verify_password(plain_password, hashed_password):
@@ -96,7 +97,7 @@ async def get_current_user(token: str = Depends(oauth2_scheme), db: Session = De
             headers={"WWW-Authenticate": "Bearer"},
         )
     
-    stmt = text("""SELECT u.*, g.ms_group_name
+    stmt = text("""SELECT u.*, g.ms_group_name,g.ms_group_id
     FROM ms_user u
     LEFT JOIN ms_user_group ug ON u.ms_user_id = ug.ms_user_id
     LEFT JOIN ms_group g ON ug.ms_group_id = g.ms_group_id
@@ -117,7 +118,8 @@ async def get_current_user(token: str = Depends(oauth2_scheme), db: Session = De
         ms_user_name=user.ms_user_name,
         isactive=user.isactive,
         username=user.ms_user_username ,
-        group=user.ms_group_name
+        group=user.ms_group_name,
+        ms_group_id=user.ms_group_id
     )
 
     return user_data

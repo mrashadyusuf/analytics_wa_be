@@ -9,6 +9,7 @@ from models.models import Transaction
 import os
 from botocore.exceptions import ClientError
 import boto3
+from auth import get_current_user
 
 from routes.transaction import generate_bucket_name, generate_parquet_file_name, aws_access_key, aws_secret_key, get_latest_transaction_file_from_s3
 # Function to process transaction and write it to S3 Parquet file
@@ -62,7 +63,7 @@ def process_transaction(ch, method, properties, body):
         print(f"Processing transaction request, but only using data from the database...",transaction_data)
 
         # Query all existing transactions from the database
-        existing_data = db.query(Transaction).all()  # Retrieve all existing transactions
+        existing_data = db.query(Transaction).filter(Transaction.ms_group_id == transaction_data['ms_group_id']).all()
         # Convert existing transactions to a DataFrame
         existing_data_df = pd.DataFrame([{
             'transaction_id': trans.transaction_id,

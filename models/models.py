@@ -22,3 +22,4 @@ class Transaction(Base):
     updated_dt = Column(DateTime, nullable=True, default=datetime.now())
     transaction_dt = Column(Date, nullable=True)
     kuantitas = Column(Integer, nullable=True, default=1)
+    ms_group_id = Column(String(25), nullable=True)

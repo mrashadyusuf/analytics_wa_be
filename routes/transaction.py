@@ -108,7 +108,8 @@ def create_transaction(
         # 7. Insert the new transaction into PostgreSQL
         db_transaction = Transaction(
             transaction_id=transaction_id,
-            **transaction_data
+            **transaction_data,
+            ms_group_id = current_user.ms_group_id
         )
         db.add(db_transaction)
         db.commit()
@@ -134,7 +135,8 @@ def create_transaction(
             'created_dt': transaction.created_dt.strftime('%Y-%m-%d %H:%M:%S'),
             'updated_by': current_user.username,
             'updated_dt': transaction.updated_dt.strftime('%Y-%m-%d %H:%M:%S'),
-            'user_group': current_user.group
+            'user_group': current_user.group,
+            'ms_group_id': current_user.ms_group_id
         }
 
         # 9. Publish transaction data to RabbitMQ
@@ -193,7 +195,8 @@ def create_transactions_in_batch(
             transaction_data = transaction.dict(exclude={'transaction_id'})
             db_transaction = Transaction(
                 transaction_id=transaction_id,
-                **transaction_data
+                **transaction_data,
+                ms_group_id = current_user.ms_group_id
             )
 
             # Insert into PostgreSQL
@@ -221,7 +224,8 @@ def create_transactions_in_batch(
                 'created_dt': transaction.created_dt.strftime('%Y-%m-%d %H:%M:%S'),
                 'updated_by': current_user.username,
                 'updated_dt': transaction.updated_dt.strftime('%Y-%m-%d %H:%M:%S'),
-                'user_group': user_group  # Add user_group to the transaction data
+                'user_group': user_group,  # Add user_group to the transaction data
+                'ms_group_id': current_user.ms_group_id,
             }
 
 
@@ -252,7 +256,9 @@ def read_transactions(
 ):
     # Base query
     query = db.query(Transaction)
-    
+    # filter by group id
+    query = query.filter(Transaction.ms_group_id == current_user.ms_group_id)
+
     # Apply search filter if search term is provided
     if search:
         search_filter = or_(
@@ -362,7 +368,8 @@ def update_transaction(
             'created_dt': update_data['created_dt'].strftime('%Y-%m-%d %H:%M:%S'),
             'updated_by': current_user.username,
             'updated_dt': update_data['updated_dt'].strftime('%Y-%m-%d %H:%M:%S'),
-            'user_group': current_user.group
+            'user_group': current_user.group,
+            'ms_group_id': current_user.ms_group_id
         }
 
 
@@ -415,7 +422,8 @@ def delete_transaction(
             'created_dt': transaction_data['created_dt'].strftime('%Y-%m-%d %H:%M:%S'),
             'updated_by': current_user.username,
             'updated_dt': transaction_data['updated_dt'].strftime('%Y-%m-%d %H:%M:%S'),
-            'user_group': current_user.group
+            'user_group': current_user.group,
+            'ms_group_id': current_user.ms_group_id
         }
 
         # 2. Delete the transaction from the database

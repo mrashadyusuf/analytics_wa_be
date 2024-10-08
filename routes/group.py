@@ -10,16 +10,21 @@ from auth import get_current_user, User
 router = APIRouter()
 
 # Create Group
-@router.post("/", response_model=GroupResponse, status_code=status.HTTP_201_CREATED)
+@router.post("/", response_model=GroupResponse, status_code=status.HTTP_200_OK)
 def create_group(
     group: GroupCreate,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    print("current_user",current_user)
+    # 1. Check if the group name already exists in the database
+    existing_group = db.query(Group).filter(Group.ms_group_name == group.ms_group_name).first()
+    if existing_group:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Group name '{group.ms_group_name}' already exists.",
+        )
     # 1. Generate a unique group ID
     new_group_id = str(uuid.uuid4())
-
     # 2. Create the new group record for the database
     new_group = Group(
         ms_group_id=new_group_id,
