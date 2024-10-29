@@ -266,8 +266,9 @@ def getParquetFromAws(bucket, scheduler):
                 file_stream = BytesIO(file_response['Body'].read())
                 pf = ParquetFile(file_stream)
                 # df = pd.read_parquet(file_stream)
-                df = pf.to_pandas()          
-
+                df = pf.to_pandas()   
+                print("df",df)       
+                
                     # Mengambil informasi yang diinginkan dari file parquet
                 try:
                     fromMe = df['fromMe'].iloc[0]
