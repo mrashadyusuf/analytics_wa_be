@@ -8,5 +8,3 @@ password "admin", username: "admin"
 how to deploy: 
 sudo docker compose build --no-cache
 sudo docker compose up -d
-
-
