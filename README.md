@@ -3,7 +3,7 @@ how to run :
 - source env/bin/activate // activate virtual environment in linux
 - D:/location_env/script/activate.bat // activate virtual environment in windows
 - pip install -r requirements.txt
-- uvicorn main:app --reloa
+- uvicorn main:app --reload
 
 update packages:
 pip freeze > requirements.txt
