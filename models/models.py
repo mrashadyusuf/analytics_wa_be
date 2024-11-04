@@ -3,10 +3,11 @@ from database import Base
 from datetime import datetime
 
 class Transaction(Base):
-    __tablename__ = "tb_transaction"
+    __tablename__ = "tb_transaction_v2"
 
     # Define transaction_id as the primary key
     transaction_id = Column(String(20), primary_key=True, index=True)
+    transaction_no = Column(String(20))
     transaction_channel = Column(String(255), nullable=True)
     model_product = Column(String(255), nullable=True)
     price_product = Column(String(255), nullable=True)

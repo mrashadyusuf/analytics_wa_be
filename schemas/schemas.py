@@ -28,9 +28,15 @@ class TransactionCreate(TransactionBase):
 class TransactionUpdate(TransactionBase):
     pass
 
+
+class TransactionCheckCustomer(BaseModel):
+    name_cust: str  # Required field
+    no_hp_cust: str = Field(default="08123456789")   # Required field
+
 # Properties stored in the database
 class TransactionInDB(TransactionBase):
     transaction_id: str  # Include transaction_id in the response
+    transaction_no: str
 
     class Config:
         orm_mode = True

@@ -5,7 +5,7 @@ from typing import List
 
 from database import get_db
 from models.models import Transaction
-from schemas.schemas import TransactionCreate, TransactionUpdate, TransactionInDB
+from schemas.schemas import TransactionCreate, TransactionUpdate, TransactionInDB, TransactionCheckCustomer
 from auth import get_current_user, User
 
 router = APIRouter()
@@ -18,10 +18,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy import desc,inspect, or_
 import os
 import boto3
-from botocore.exceptions import ClientError
-
-import pyarrow as pa
-import pyarrow.parquet as pq
+import uuid
 
 
 from consumer.publish import publish_to_rabbitmq
@@ -73,41 +70,22 @@ def create_transaction(
 ):
     try:
         print("Starting transaction process with PostgreSQL and RabbitMQ...")
-        # 1. Retrieve the last created transaction in PostgreSQL
-        last_transaction = db.query(Transaction).order_by(
-            desc(Transaction.created_dt),
-            desc(Transaction.transaction_id)
-        ).first()
-        
-        if last_transaction:
-            # Extract the numeric part from the last transaction ID
-            last_num_id = int(last_transaction.transaction_id[2:6])  # e.g., 0005 -> 5
-            # Increment the numeric part by 1
-            new_num_id = str(last_num_id + 1).zfill(4)  # e.g., '0006'
-        else:
-            # If no previous transactions exist, start with '0001'
-            new_num_id = '0001'
+       
+        transaction_no = generateTransactionNo(db,  transaction.transaction_dt,  transaction.transaction_channel)
 
-        # 2. Format the transaction date to 'ddmmyy'
-        transaction_date_str = transaction.transaction_dt.strftime('%d%m%y')  # e.g., '210824'
-
-        # 3. Extract the first two characters from the transaction channel
-        channel_code = transaction.transaction_channel[:2].upper()  # e.g., 'ON'
-
-        # 4. Construct the transaction_id
-        transaction_id = f'TT{new_num_id}{transaction_date_str}{channel_code}'
-
-        # 5. Check if the generated transaction_id already exists in PostgreSQL
-        existing_transaction = db.query(Transaction).filter(Transaction.transaction_id == transaction_id).first()
+        # 5. Check if the generated transaction_no already exists in PostgreSQL
+        existing_transaction = db.query(Transaction).filter(Transaction.transaction_no == transaction_no).first()
         if existing_transaction:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Transaction ID already exists")
-
+        
         # 6. Prepare the data for insertion into PostgreSQL
         transaction_data = transaction.dict(exclude={'transaction_id'})
+        transaction_id = str (uuid.uuid4())
 
         # 7. Insert the new transaction into PostgreSQL
         db_transaction = Transaction(
             transaction_id=transaction_id,
+            transaction_no = transaction_no,
             **transaction_data,
             ms_group_id = current_user.ms_group_id
         )
@@ -167,34 +145,23 @@ def create_transactions_in_batch(
         # Prepare a list to collect all transaction data for the batch
         transaction_batch_data = []
 
+
+        transaction_no = generateTransactionNo(db,transactions[0].transaction_dt, transactions[0].transaction_channel )
+        # Check if transaction no already exists
+        existing_transaction = db.query(Transaction).filter(Transaction.transaction_no == transaction_no).first()
+        if existing_transaction:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Transaction Number already exists")
+        
         # Process each transaction in the batch
-        for transaction in transactions:
-            # Retrieve the last created transaction in PostgreSQL
-            last_transaction = db.query(Transaction).order_by(
-                desc(Transaction.created_dt),
-                desc(Transaction.transaction_id)
-            ).first()
-            if last_transaction:
-                last_num_id = int(last_transaction.transaction_id[2:6])  # Extract numeric part, e.g., '0005' -> 5
-                new_num_id = str(last_num_id + 1).zfill(4)  # Increment by 1 and zero-fill, e.g., '0006'
-            else:
-                new_num_id = '0001'  # If no previous transactions, start with '0001'
-            # Format the transaction date and extract channel code
-            transaction_date_str = transaction.transaction_dt.strftime('%d%m%y')  # Format 'ddmmyy'
-            channel_code = transaction.transaction_channel[:2].upper()  # Get first two characters of the channel
-
-            # Construct the transaction_id
-            transaction_id = f'TT{new_num_id}{transaction_date_str}{channel_code}'
-
-            # Check if transaction ID already exists
-            existing_transaction = db.query(Transaction).filter(Transaction.transaction_id == transaction_id).first()
-            if existing_transaction:
-                raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Transaction ID already exists")
+        for transaction in transactions:   
 
             # Prepare the transaction data for PostgreSQL insertion
             transaction_data = transaction.dict(exclude={'transaction_id'})
+            transaction_id = str (uuid.uuid4())
+
             db_transaction = Transaction(
                 transaction_id=transaction_id,
+                transaction_no = transaction_no,
                 **transaction_data,
                 ms_group_id = current_user.ms_group_id
             )
@@ -231,6 +198,7 @@ def create_transactions_in_batch(
 
             # Append each transaction data to the batch list
             transaction_batch_data.append(transaction_data_for_queue)
+            print("finish loop")
 
         # Publish the entire batch of transactions as an array to RabbitMQ
         publish_to_rabbitmq('transaction_queue', transaction_data_for_queue)
@@ -293,6 +261,31 @@ def read_transactions(
         "offset": offset,
         "transactions": transactions
     }
+
+@router.post("/check-username-phonenumber", status_code=status.HTTP_200_OK)
+def check_transaction(
+    transaction: TransactionCheckCustomer, 
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)  # JWT authentication
+):
+    try:
+        existing_transaction = (
+            db.query(Transaction)
+            .filter(Transaction.name_cust == transaction.name_cust)
+            .filter(Transaction.no_hp_cust == transaction.no_hp_cust)  # Additional condition
+            .first()
+        )
+        print("existing_transaction",existing_transaction)
+        return existing_transaction
+       
+        
+    
+    except HTTPException as http_exc:
+        # Re-raise the HTTPException to ensure FastAPI handles it
+        raise http_exc
+    except Exception as e:
+        print(f"Internal Server Error: {str(e)}")
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Internal Server Error")
 
 
 
@@ -441,3 +434,25 @@ def delete_transaction(
     except Exception as e:
         print(f"Internal Server Error: {str(e)}")
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Internal Server Error")
+
+def generateTransactionNo(db, transaction_date, transaction_channel):
+    # Format the transaction date and extract channel code
+    transaction_date_str = transaction_date.strftime('%d%m%y')  # Format 'ddmmyy'
+    channel_code = transaction_channel[:2].upper()  # Get first two characters of the channel
+    
+    # Retrieve the last created transaction in PostgreSQL
+    last_transaction = db.query(Transaction).order_by(
+        desc(Transaction.created_dt),
+        desc(Transaction.transaction_no)
+    ).first()
+    if last_transaction:
+        if last_transaction.transaction_no[2:6] == '9999':
+            new_num_id = '0001'
+        else:
+            last_num_id = int(last_transaction.transaction_no[2:6])  # Extract numeric part, e.g., '0005' -> 5
+            new_num_id = str(last_num_id + 1).zfill(4)  # Increment by 1 and zero-fill, e.g., '0006'
+    else:
+        new_num_id = '0001'
+
+    transaction_id = f'TT{new_num_id}{transaction_date_str}{channel_code}'
+    return transaction_id

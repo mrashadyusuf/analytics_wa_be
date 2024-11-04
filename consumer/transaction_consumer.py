@@ -67,6 +67,7 @@ def process_transaction(ch, method, properties, body):
         # Convert existing transactions to a DataFrame
         existing_data_df = pd.DataFrame([{
             'transaction_id': trans.transaction_id,
+            'transaction_no': trans.transaction_no,
             'transaction_channel': trans.transaction_channel,
             'transaction_dt': trans.transaction_dt.strftime('%Y-%m-%d'),
             'model_product': trans.model_product,
