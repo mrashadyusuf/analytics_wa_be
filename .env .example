@@ -1,16 +1,14 @@
+# Database Configuration
 DATABASE_URL="postgresql://<username>:<password>@<host>:<port>/<database_name>"
 
-#aws
-ACCESS_KEY=
-SECRET_KEY=
-REGION=us-
+# AWS S3 Configuration
+ACCESS_KEY=<your_access_key>
+SECRET_KEY=<your_secret_key>
+REGION=<your_region>
+BUCKET_NAME=<your_bucket_name>
 
-#akun instagram
-USERNAME_IG=
-PASSWORD_IG=
-
-# rabbitmq config
-RABBITMQ_HOST=localhost
-RABBITMQ_PORT=5672
-RABBITMQ_USER=guest
-RABBITMQ_PASSWORD=guest
+# RabbitMQ Configuration
+RABBITMQ_HOST=<rabbitmq_host>
+RABBITMQ_PORT=<rabbitmq_port>
+RABBITMQ_USER=<rabbitmq_user>
+RABBITMQ_PASSWORD=<rabbitmq_password>
